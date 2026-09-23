@@ -459,7 +459,7 @@ int main(void)
      * idle deadline. Such a byte cannot reset the idle clock. */
     reset();
     eota_http_deadline_t delayed_timer = {0};
-    assert(eota_http_deadline_init(&delayed_timer, -1));
+    assert(eota_http_deadline_init(&delayed_timer));
     int64_t delayed_progress_us = now_us;
     assert(eota_http_deadline_arm(&delayed_timer, now_us, delayed_progress_us, 300000, 30000));
     now_us = INT64_C(30000001);

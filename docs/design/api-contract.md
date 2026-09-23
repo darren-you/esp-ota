@@ -11,6 +11,6 @@
 
 IDF v6.1 的 HTTP header、发送与响应体方法都可能在单次调用内多次使用底层传输，不能只给每次调用设置相同的 socket 超时。本仓只保留一个网络路径：官方 `esp_http_client` 负责 HTTP 状态与解析，自有 custom transport 先通过 lwIP 核心线程的异步 DNS API 解析，再以非阻塞 socket 连接，并用 mBed TLS 公共 API 执行 TLS。`CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y` 是签名 OTA 必需配置。TLS 强制 `VERIFY_REQUIRED`、CA bundle 与原 URL 主机名的 SNI/证书名验证；HTTP 客户端保留原 URL 和 Host。
 
-总期限从 DNS 前开始；无进展期限由实际收发的网络字节刷新；DNS、TCP、TLS、请求发送、响应头和响应体共用这两项绝对期限，连接阶段另受 `connect_timeout_ms` 约束。到期定时器仅标记失效并 `shutdown` 已创建的 socket；DNS 迟到回调由独立引用持有上下文，至多保留一个未完成解析。返回后先用 `esp_timer_stop_blocking` 等待回调退出，再让 HTTP 清理并由 custom transport 关闭 socket，避免文件描述符复用竞态。
+总期限从 DNS 前开始；无进展期限由实际收发的网络字节刷新；DNS、TCP、TLS、请求发送、响应头和响应体共用这两项绝对期限，连接阶段另受 `connect_timeout_ms` 约束。到期定时器只标记失效；DNS 每 tick 检查一次，非阻塞 socket 的 `select` 等待取单次读取期限和两项绝对期限的最小剩余时间，返回后再查单调时钟。DNS 迟到回调由独立引用持有上下文，至多保留一个未完成解析。返回后先用 `esp_timer_stop_blocking` 等待回调退出，再让 HTTP 清理并由 custom transport 关闭 socket；到期回调不持有或操作文件描述符。
 
-这些期限约束网络等待和每次调用的返回边界。mBed TLS 单次密码学步骤、已缓存记录解析与 HTTP 解析不能被本库抢占，因此不承诺调度器停止或单步计算跨过期限时的硬实时返回。真实 HTTPS 的 CA、SNI、证书名与长期慢滴流尚无实板运行证据；主计划 P5-04 仍未验收。
+这些期限约束正常调度下的网络等待和每次调用的返回边界。固定 lwIP 的 `shutdown`/`close` 可能同步等待 TCP/IP 线程；mBed TLS 单次密码学步骤、已缓存记录解析与 HTTP 解析不能被本库抢占。库因此不承诺 30 秒无进展或 5 分钟总期限就是 `eota_prepare` 的严格墙钟返回上界。真实 HTTPS 的 CA、SNI、证书名与长期慢滴流尚无实板运行证据；主计划 P5-04 仍未验收。

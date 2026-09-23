@@ -270,7 +270,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     result = EOTA_UPDATE_RESOURCE_FAILURE;
     const int64_t started_us = esp_timer_get_time();
     int64_t last_progress_us = started_us;
-    if (!eota_http_deadline_init(&deadline, -1)) goto abort;
+    if (!eota_http_deadline_init(&deadline)) goto abort;
     if (!eota_http_deadline_arm(&deadline, started_us, last_progress_us,
                                 policy->total_timeout_ms, policy->idle_timeout_ms)) goto abort;
     transport = eota_http_transport_create(&deadline, started_us, &last_progress_us,
@@ -353,8 +353,8 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     }
     if (!esp_http_client_is_complete_data_received(client) ||
         !within_download_deadline(policy, started_us, last_progress_us)) goto abort;
-    /* The transfer is complete. Join the timer callback before HTTP closes
-     * its transport and before the descriptor can be reused. */
+    /* The transfer is complete. Join the timer callback before releasing its
+     * stack-owned deadline argument and cleaning up HTTP. */
     if (!eota_http_deadline_stop(&deadline)) goto abort;
     eota_http_deadline_destroy(&deadline);
     (void)esp_http_client_cleanup(client);

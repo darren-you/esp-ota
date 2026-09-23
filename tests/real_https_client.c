@@ -206,7 +206,7 @@ int main(int argc, char **argv)
     const int64_t started_us = esp_timer_get_time();
     int64_t last_progress_us = started_us;
     eota_http_deadline_t deadline;
-    assert(eota_http_deadline_init(&deadline, -1));
+    assert(eota_http_deadline_init(&deadline));
     assert(eota_http_deadline_arm(&deadline, started_us, last_progress_us, total_ms, idle_ms));
     esp_transport_handle_t transport = eota_http_transport_create(&deadline, started_us,
         &last_progress_us, total_ms, idle_ms, total_ms);

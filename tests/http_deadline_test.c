@@ -1,6 +1,7 @@
 #include "http_deadline.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -131,12 +132,15 @@ int main(void)
     pthread_t sender;
     assert(pthread_create(&sender, NULL, drip, &sockets[1]) == 0);
     eota_http_deadline_t deadline;
-    assert(eota_http_deadline_init(&deadline, sockets[0]));
+    assert(eota_http_deadline_init(&deadline));
     const int64_t start = esp_timer_get_time();
     assert(eota_http_deadline_arm(&deadline, start, start, 1000, 250));
     char byte;
     int received = 0;
-    while (recv(sockets[0], &byte, 1, 0) == 1) received++;
+    while (eota_http_deadline_alive(&deadline)) {
+        if (recv(sockets[0], &byte, 1, MSG_DONTWAIT) == 1) received++;
+        sleep_ms(1);
+    }
     const int64_t elapsed_ms = (esp_timer_get_time() - start) / 1000;
     assert(received > 5 && elapsed_ms >= 200 && elapsed_ms < 800);
     assert(!eota_http_deadline_stop(&deadline));
@@ -145,9 +149,9 @@ int main(void)
     close(sockets[1]);
     assert(pthread_join(sender, NULL) == 0);
 
-    /* A cancelled timer must never shut down a later socket that reuses FD. */
+    /* A stopped timer must not touch a later socket that reuses the FD. */
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
-    assert(eota_http_deadline_init(&deadline, sockets[0]));
+    assert(eota_http_deadline_init(&deadline));
     const int64_t next = esp_timer_get_time();
     assert(eota_http_deadline_arm(&deadline, next, next, 500, 500));
     assert(eota_http_deadline_stop(&deadline));
@@ -161,18 +165,33 @@ int main(void)
     close(sockets[0]);
     close(sockets[1]);
 
-    /* A socket published after DNS time-out must be shut down immediately. */
+    /* DNS can expire before any socket exists. A later socket remains owned
+     * solely by its caller, and cannot be touched by the expired timer. */
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
-    assert(eota_http_deadline_init(&deadline, -1));
+    assert(eota_http_deadline_init(&deadline));
     const int64_t dns_start = esp_timer_get_time();
     assert(eota_http_deadline_arm(&deadline, dns_start, dns_start, 35, 35));
     sleep_ms(80);
-    eota_http_deadline_set_socket(&deadline, sockets[0]);
     assert(!eota_http_deadline_stop(&deadline));
-    assert(recv(sockets[0], &byte, 1, 0) == 0);
+    assert(send(sockets[1], "r", 1, 0) == 1);
+    assert(recv(sockets[0], &byte, 1, 0) == 1 && byte == 'r');
     eota_http_deadline_destroy(&deadline);
     close(sockets[0]);
     close(sockets[1]);
-    printf("  HTTP socket deadline passed (slow drip cut at %lld ms, %d bytes; cleanup joined)\n",
+    /* Expiration must not enter lwIP's potentially unbounded shutdown path.
+     * The owner observes the deadline and closes the socket after joining. */
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    assert(eota_http_deadline_init(&deadline));
+    const int64_t quiet_start = esp_timer_get_time();
+    assert(eota_http_deadline_arm(&deadline, quiet_start, quiet_start, 35, 35));
+    sleep_ms(80);
+    assert(!eota_http_deadline_stop(&deadline));
+    errno = 0;
+    assert(recv(sockets[0], &byte, 1, MSG_DONTWAIT) == -1 &&
+           (errno == EAGAIN || errno == EWOULDBLOCK));
+    eota_http_deadline_destroy(&deadline);
+    close(sockets[0]);
+    close(sockets[1]);
+    printf("  HTTP deadline passed (slow drip stopped at %lld ms, %d bytes; callback joined)\n",
            (long long)elapsed_ms, received);
 }

@@ -230,7 +230,7 @@ static void wait_dns(void) { for(int i=0;i<500 && atomic_load(&dns_pending);i++)
 static void run_case(const char *name,int port,int total_ms,int connect_ms,int expected_connect,int mode,int server_delay_ms) {
     (void)server_delay_ms;
     atomic_store(&tls_mode,mode);
-    eota_http_deadline_t deadline; assert(eota_http_deadline_init(&deadline,-1));
+    eota_http_deadline_t deadline; assert(eota_http_deadline_init(&deadline));
     int64_t start=esp_timer_get_time(),progress=start;
     assert(eota_http_deadline_arm(&deadline,start,progress,total_ms,total_ms));
     esp_transport_handle_t transport=eota_http_transport_create(&deadline,start,&progress,total_ms,total_ms,connect_ms);assert(transport);
@@ -251,7 +251,7 @@ static void run_case(const char *name,int port,int total_ms,int connect_ms,int e
 }
 static void test_fd_reuse(void) {
     int pair[2];assert(socketpair(AF_UNIX,SOCK_STREAM,0,pair)==0);
-    int old_fd=pair[0];eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline,old_fd));
+    int old_fd=pair[0];eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline));
     int64_t now=esp_timer_get_time();assert(eota_http_deadline_arm(&deadline,now,now,120,120));
     assert(eota_http_deadline_stop(&deadline));eota_http_deadline_destroy(&deadline);
     close(pair[0]);close(pair[1]);assert(socketpair(AF_UNIX,SOCK_STREAM,0,pair)==0);
@@ -265,7 +265,7 @@ static void test_read_result_contract(void) {
     server.listener=listen_loopback(&port);
     pthread_t thread;assert(pthread_create(&thread,NULL,serve,&server)==0);
     atomic_store(&tls_mode,TLS_NORMAL);
-    eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline,-1));
+    eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline));
     int64_t start=esp_timer_get_time(),progress=start;
     assert(eota_http_deadline_arm(&deadline,start,progress,500,300));
     esp_transport_handle_t transport=eota_http_transport_create(&deadline,start,&progress,500,300,150);
@@ -288,7 +288,7 @@ static void test_absolute_read_deadline(int total_ms,int idle_ms) {
     server_t server={.handshake=true,.single_reply=true,.reply_delay_ms=600};
     server.listener=listen_loopback(&port);
     pthread_t thread;assert(pthread_create(&thread,NULL,serve,&server)==0);
-    eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline,-1));
+    eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline));
     int64_t start=esp_timer_get_time(),progress=start;
     assert(eota_http_deadline_arm(&deadline,start,progress,total_ms,idle_ms));
     esp_transport_handle_t transport=eota_http_transport_create(&deadline,start,&progress,total_ms,idle_ms,100);

@@ -202,7 +202,6 @@ static bool connect_socket(eota_http_transport_t *transport, const ip_addr_t *ad
     const int fd = socket(storage.ss_family, SOCK_STREAM, IPPROTO_TCP);
     if (fd < 0) return false;
     transport->socket_fd = fd;
-    eota_http_deadline_set_socket(transport->deadline, fd);
     const int flags = fcntl(fd, F_GETFL, 0);
     if (fd >= FD_SETSIZE || flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 ||
         remaining_us(transport, true) <= 0) return false;
@@ -349,12 +348,10 @@ static int transport_poll_write(esp_transport_handle_t handle, int timeout_ms)
 
 static int transport_close(esp_transport_handle_t handle)
 {
-    eota_http_transport_t *transport = esp_transport_get_context_data(handle);
-    if (transport != NULL && transport->socket_fd >= 0) {
-        (void)shutdown(transport->socket_fd, SHUT_RDWR);
-    }
-    /* HTTP may close on an error while the deadline timer is armed. Only the
-     * final destroy, after esp_timer_stop_blocking, may release the fd. */
+    (void)handle;
+    /* This OTA transport is single-use. HTTP may call close on an error while
+     * the deadline is active; defer the lwIP close until the owner has joined
+     * the timer and destroyed the HTTP client. */
     return 0;
 }
 
