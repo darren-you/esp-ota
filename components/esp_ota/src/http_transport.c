@@ -289,23 +289,28 @@ static int transport_read(esp_transport_handle_t handle, char *buffer, int lengt
                           int timeout_ms)
 {
     eota_http_transport_t *transport = esp_transport_get_context_data(handle);
-    if (transport == NULL || buffer == NULL || length <= 0) return -1;
+    if (transport == NULL || buffer == NULL || length <= 0) {
+        return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
+    }
     if (length > 1024) length = 1024;
     while (remaining_us(transport, false) > 0) {
         const int received = mbedtls_ssl_read(&transport->ssl, (unsigned char *)buffer,
                                                (size_t)length);
-        if (remaining_us(transport, false) <= 0) return -1;
-        if (received >= 0) return received;
+        if (remaining_us(transport, false) <= 0) return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
+        if (received > 0) return received;
+        if (received == 0) return ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN;
         /* TLS 1.3 may deliver a post-handshake ticket before application data. */
         if (received == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) continue;
         if (received != MBEDTLS_ERR_SSL_WANT_READ &&
-            received != MBEDTLS_ERR_SSL_WANT_WRITE) return -1;
+            received != MBEDTLS_ERR_SSL_WANT_WRITE) return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
         if (received == MBEDTLS_ERR_SSL_WANT_READ &&
             mbedtls_ssl_get_bytes_avail(&transport->ssl) != 0) continue;
-        if (wait_socket(transport, received == MBEDTLS_ERR_SSL_WANT_WRITE,
-                        timeout_ms, false) != 1) return -1;
+        const int ready = wait_socket(transport, received == MBEDTLS_ERR_SSL_WANT_WRITE,
+                                      timeout_ms, false);
+        if (ready == 0) return ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT;
+        if (ready < 0) return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
     }
-    return -1;
+    return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
 }
 
 static int transport_write(esp_transport_handle_t handle, const char *buffer, int length,

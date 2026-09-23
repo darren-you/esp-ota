@@ -160,7 +160,7 @@ static atomic_int tcpip_delay_ms;
 static atomic_int tcpip_pending;
 static atomic_int verification_flags;
 static atomic_int tls_mode;
-enum { TLS_NORMAL, TLS_SLOW_HANDSHAKE, TLS_SLOW_WRITE, TLS_VERIFY_FAIL };
+enum { TLS_NORMAL, TLS_SLOW_HANDSHAKE, TLS_SLOW_WRITE, TLS_VERIFY_FAIL, TLS_FATAL_READ };
 typedef struct { dns_found_callback callback; void *argument; char name[256]; } dns_job_t;
 static void *dns_worker(void *argument) {
     dns_job_t *job=argument; sleep_ms(atomic_load(&dns_delay_ms));
@@ -195,14 +195,17 @@ int mbedtls_ssl_setup(mbedtls_ssl_context *s,const mbedtls_ssl_config *c) { (voi
 void mbedtls_ssl_set_bio(mbedtls_ssl_context *s,void *ctx,int (*send_fn)(void *,const unsigned char *,size_t),int (*recv_fn)(void *,unsigned char *,size_t),void *unused) { (void)unused;s->context=ctx;s->send=send_fn;s->recv=recv_fn; }
 int mbedtls_ssl_is_handshake_over(const mbedtls_ssl_context *s) { return s->handshake_count>=1; }
 int mbedtls_ssl_handshake_step(mbedtls_ssl_context *s) { unsigned char byte; int n=s->recv(s->context,&byte,1); if(n==1 && byte=='H') { s->handshake_count=1;return 0; } return n==MBEDTLS_ERR_NET_RECV_FAILED?n:MBEDTLS_ERR_SSL_WANT_READ; }
-int mbedtls_ssl_read(mbedtls_ssl_context *s,unsigned char *buffer,size_t length) { return s->recv(s->context,buffer,length); }
+int mbedtls_ssl_read(mbedtls_ssl_context *s,unsigned char *buffer,size_t length) {
+    if(atomic_load(&tls_mode)==TLS_FATAL_READ) return -0x7777;
+    return s->recv(s->context,buffer,length);
+}
 int mbedtls_ssl_write(mbedtls_ssl_context *s,const unsigned char *buffer,size_t length) { if(atomic_load(&tls_mode)==TLS_SLOW_WRITE) { int result=s->send(s->context,buffer,1); sleep_ms(15); return result; } return s->send(s->context,buffer,length); }
 size_t mbedtls_ssl_get_bytes_avail(const mbedtls_ssl_context *s) { (void)s;return 0; }
 uint32_t mbedtls_ssl_get_verify_result(const mbedtls_ssl_context *s) { (void)s;atomic_fetch_add(&verification_checks,1);return (uint32_t)atomic_load(&verification_flags); }
 void mbedtls_ssl_free(mbedtls_ssl_context *s) { (void)s; }
 void mbedtls_ssl_config_free(mbedtls_ssl_config *c) { (void)c; }
 
-typedef struct { int listener; int delay_ms; int drip_ms; bool handshake; bool read_request; } server_t;
+typedef struct { int listener; int delay_ms; int drip_ms; int reply_delay_ms; bool handshake; bool read_request; bool single_reply; } server_t;
 static int listen_loopback(int *port) {
     int fd=socket(AF_INET,SOCK_STREAM,0); assert(fd>=0);
     struct sockaddr_in address={.sin_family=AF_INET,.sin_port=0,.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
@@ -213,6 +216,11 @@ static void *serve(void *argument) {
     server_t *server=argument;int fd=accept(server->listener,NULL,NULL);assert(fd>=0);
     if(server->delay_ms) sleep_ms(server->delay_ms);
     if(server->handshake) (void)send(fd,"H",1,0);
+    if(server->single_reply) {
+        sleep_ms(server->reply_delay_ms);
+        (void)send(fd,"x",1,MSG_NOSIGNAL);
+        close(fd);return NULL;
+    }
     if(server->read_request) { char byte; for(int i=0;i<40;i++) { sleep_ms(15); if(recv(fd,&byte,1,MSG_DONTWAIT)==0) break; } }
     else for(int i=0;i<30 && server->drip_ms;i++) { sleep_ms(server->drip_ms); if(send(fd,"x",1,MSG_NOSIGNAL)!=1) break; }
     close(fd);return NULL;
@@ -250,6 +258,53 @@ static void test_fd_reuse(void) {
     assert(dup2(pair[0],old_fd)==old_fd);if(pair[0]!=old_fd) close(pair[0]);
     sleep_ms(150);char byte;assert(send(pair[1],"z",1,0)==1);
     assert(recv(old_fd,&byte,1,0)==1 && byte=='z');close(old_fd);close(pair[1]);
+}
+static void test_read_result_contract(void) {
+    int port;
+    server_t server={.handshake=true,.single_reply=true,.reply_delay_ms=80};
+    server.listener=listen_loopback(&port);
+    pthread_t thread;assert(pthread_create(&thread,NULL,serve,&server)==0);
+    atomic_store(&tls_mode,TLS_NORMAL);
+    eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline,-1));
+    int64_t start=esp_timer_get_time(),progress=start;
+    assert(eota_http_deadline_arm(&deadline,start,progress,500,300));
+    esp_transport_handle_t transport=eota_http_transport_create(&deadline,start,&progress,500,300,150);
+    assert(transport && transport->connect(transport,"localhost",port,150)==0);
+    char byte;
+    /* A per-read timeout must remain retryable until the idle deadline. */
+    assert(transport->read(transport,&byte,1,20)==ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT);
+    assert(transport->read(transport,&byte,1,200)==1 && byte=='x');
+    assert(transport->read(transport,&byte,1,200)==ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN);
+    atomic_store(&tls_mode,TLS_FATAL_READ);
+    assert(transport->read(transport,&byte,1,20)==ERR_TCP_TRANSPORT_CONNECTION_FAILED);
+    (void)eota_http_deadline_stop(&deadline);
+    eota_http_deadline_destroy(&deadline);
+    assert(esp_transport_destroy(transport)==ESP_OK);
+    pthread_join(thread,NULL);close(server.listener);
+    atomic_store(&tls_mode,TLS_NORMAL);
+}
+static void test_absolute_read_deadline(int total_ms,int idle_ms) {
+    int port;
+    server_t server={.handshake=true,.single_reply=true,.reply_delay_ms=600};
+    server.listener=listen_loopback(&port);
+    pthread_t thread;assert(pthread_create(&thread,NULL,serve,&server)==0);
+    eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline,-1));
+    int64_t start=esp_timer_get_time(),progress=start;
+    assert(eota_http_deadline_arm(&deadline,start,progress,total_ms,idle_ms));
+    esp_transport_handle_t transport=eota_http_transport_create(&deadline,start,&progress,total_ms,idle_ms,100);
+    assert(transport && transport->connect(transport,"localhost",port,100)==0);
+    char byte;int retries=0,result;
+    do {
+        result=transport->read(transport,&byte,1,20);
+        if(result==ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT) retries++;
+    } while(result==ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT);
+    assert(retries>=2 && result==ERR_TCP_TRANSPORT_CONNECTION_FAILED);
+    int64_t elapsed_ms=(esp_timer_get_time()-start)/1000;
+    assert(elapsed_ms>=160 && elapsed_ms<1000);
+    (void)eota_http_deadline_stop(&deadline);
+    eota_http_deadline_destroy(&deadline);
+    assert(esp_transport_destroy(transport)==ESP_OK);
+    pthread_join(thread,NULL);close(server.listener);
 }
 int main(void) {
     signal(SIGPIPE,SIG_IGN);
@@ -292,5 +347,8 @@ int main(void) {
     assert(atomic_load(&verification_checks)==checks_before+1);
     atomic_store(&verification_flags,0);pthread_join(thread,NULL);close(bad_cert.listener);
     test_fd_reuse();
+    test_read_result_contract();
+    test_absolute_read_deadline(240,500);
+    test_absolute_read_deadline(500,240);
     puts("  transport DNS, TCP, TLS, write/read deadlines and FD reuse passed");return 0;
 }
