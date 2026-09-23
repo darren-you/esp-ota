@@ -98,13 +98,17 @@ eota_result_t eota_observe_slots(const eota_policy_t *policy, eota_slots_t *slot
 eota_result_t eota_preflight(const eota_policy_t *policy, uint32_t image_size_bytes,
                              eota_slots_t *slots);
 /* Synchronously downloads into the inactive slot and verifies its complete
- * signed bytes. It does not modify otadata or reboot. Caller owns the worker,
+ * signed bytes. It does not select a new boot slot or reboot. ESP-IDF may
+ * invalidate the inactive slot's previous otadata entry at esp_ota_begin.
+ * Caller owns the worker,
  * network/time preconditions, operation receipt and serialization. Progress
  * callback must neither block nor call eota_* recursively. */
 eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *image,
                            eota_progress_t progress, void *context, eota_prepared_t *prepared);
 /* Rechecks slots, full signed image digest and SDK signature verification,
- * then selects the target boot slot. A failed selector readback is explicit. */
+ * then selects the target boot slot. On selection failure it restores the
+ * running slot's VALID state and clears an unbooted NEW target entry; any
+ * uncertain durable state is reported explicitly. */
 eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *prepared);
 /* Hash exactly size_bytes of the current running app, including its signature. */
 eota_result_t eota_sha256_running(const eota_policy_t *policy, uint32_t size_bytes,

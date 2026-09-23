@@ -56,6 +56,7 @@ int main(void)
     assert(eota_inspect(&ota) == ESP_FAIL);
     inspect_result = ESP_ERR_NOT_FOUND;
     assert(eota_inspect(&ota) == ESP_OK && ota.state == EOTA_STATE_UNTRACKED);
+    assert(eota_confirm_pending(&ota) == ESP_ERR_INVALID_STATE && mark_calls == 0);
     inspect_result = ESP_ERR_NOT_SUPPORTED;
     assert(eota_inspect(&ota) == ESP_ERR_NOT_SUPPORTED && ota.state == EOTA_STATE_UNKNOWN);
     inspect_result = ESP_OK;

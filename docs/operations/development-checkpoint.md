@@ -25,3 +25,9 @@
 固定 IDF `fff9895c82d744c7237be8847347bdd1b07c6643` 的 mbedTLS 4.1 原生构建，链接同一份 `http_transport.c`。AppleClang ASan/UBSan CTest 5/5 通过，其中真实 HTTPS 回环含六个场景：TLS 1.2 下正确 CA 与 `localhost` SNI/证书名可读完整响应；错误 CA、`wrong.local` 主机名被拒；握手停顿在约 250 毫秒连接截止；响应每 60 毫秒 1 字节，在约 450 毫秒总期限失败。TLS 1.3 成功场景发现 `mbedtls_ssl_read` 会先返回非致命 `MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET`；传输现继续读取应用数据。测试 CA 在 host 的 `esp_crt_bundle_attach` 适配函数中注入，证书链、主机名及 TLS 记录由真实 mbedTLS 验证。原生库使用 host 默认配置，当前 C3 样例仅启用 TLS 1.2；未执行设备侧 ESP 证书 bundle、真实 DNS/lwIP、`esp_http_client` 解析或升级写槽。
 
 固定 IDF C3 样例以仓外临时 RSA-3072 测试键重新签名构建：镜像 `0x31000` 字节，SHA-256 `4c52fc53ce83c669b49e528aa5d3c8ab0b51da91b51a604987c2b595aaf28de4`；`espsecure verify-signature --version 2 --keyfile` 核验 RSA 签名有效。没有刷板、改分区、eFuse 或生产密钥。P5-04 仍缺设备上的完整 HTTPS、HTTP 解析、Flash 与 bootloader 路径及实板长滴流证据，因此保持未验收。
+
+## 槽选择失败恢复复验（2026-09-23）
+
+固定 IDF `fff9895c82d744c7237be8847347bdd1b07c6643` 的 `app_update/esp_ota_ops.c` 中，`esp_ota_set_boot_partition` 对任意选中槽写入 `ESP_OTA_IMG_NEW`；即使失败后再选回当前正在运行的旧槽，旧槽也会变成 NEW。原库只读回 boot 指针便报告普通切槽失败，下一次预检因运行槽不再是 VALID 而拒绝升级，重启后也会进入新的 pending 窗口。故障假件先复现该失败，再验证恢复时将旧运行槽标回 VALID、清除未启动目标槽的 NEW 记录并重新预检；状态写入或清除不确定时报告 `EOTA_UPDATE_BOOT_STATE_UNKNOWN`。UNTRACKED 运行状态不再冒充 pending 确认成功。
+
+固定 IDF 的 `esp_ota_begin` 会尝试使 inactive 槽原有的 otadata 记录失效；`prepare` 只承诺不选择新启动槽，不承诺 otadata 完全不变。选择失败时还覆盖 boot 未改变但目标槽已留下 NEW 记录的读回路径。IDF 的 `esp_ota_mark_app_valid_cancel_rollback` 在 `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` 下会继续调用 eFuse 更新，因此组件在 IDF 构建中明确拒绝该配置；带该宏的目标源码编译已确认被拒绝。AppleClang ASan/UBSan host CTest 4/4 通过；普通 C3 构建 `0x28190` 字节；仓外临时 RSA-3072 测试键签名 C3 构建 `0x31000` 字节，SHA-256 `12c343d15412c9ee621cb805c6fd4695e833ab92095e23c15362cc6a8f23877c`，本机 `espsecure verify-signature --version 2 --keyfile` 核验通过。未刷板、写设备 otadata、改分区或使用生产凭据；真实 Flash 错误及 bootloader 跨启动仍待实板验证。

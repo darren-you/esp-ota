@@ -410,13 +410,39 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
     if (select == ESP_OK && target_selected && esp_ota_check_rollback_is_possible()) {
         return EOTA_UPDATE_OK;
     }
-    if (target_selected || !same_partition(esp_ota_get_boot_partition(), running)) {
-        /* A failed selector write may have reached otadata. Restore the
-         * previous signed image, then read it back before reporting. */
+    /* A failed selector write may have reached otadata even if readback still
+     * names the running slot. Restore and inspect both durable slot states. */
+    if (!same_partition(esp_ota_get_boot_partition(), running)) {
         (void)esp_ota_set_boot_partition(running);
-        if (!same_partition(esp_ota_get_boot_partition(), running)) {
+    }
+    if (!same_partition(esp_ota_get_boot_partition(), running)) {
+        return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    }
+    esp_ota_img_states_t running_state;
+    if (esp_ota_get_state_partition(running, &running_state) != ESP_OK) {
+        return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    }
+    if (running_state == ESP_OTA_IMG_NEW) {
+        /* ESP-IDF marks a selected app NEW, including the old running app
+         * when it is reselected after a failed target selection. */
+        (void)esp_ota_mark_app_valid_cancel_rollback();
+        if (esp_ota_get_state_partition(running, &running_state) != ESP_OK ||
+            running_state != ESP_OTA_IMG_VALID) {
             return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
         }
+    } else if (running_state != ESP_OTA_IMG_VALID) {
+        return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    }
+    esp_ota_img_states_t target_state;
+    if (esp_ota_get_state_partition(target, &target_state) == ESP_OK &&
+        (target_state == ESP_OTA_IMG_NEW || target_state == ESP_OTA_IMG_PENDING_VERIFY)) {
+        /* The failed selection left an unbooted candidate in otadata. */
+        (void)esp_ota_invalidate_inactive_ota_data_slot();
+    }
+    eota_slots_t restored_slots;
+    if (inspect_slots(policy, prepared->image_size_bytes, &restored_slots,
+                      NULL, NULL) != EOTA_UPDATE_OK) {
+        return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     }
     return select == ESP_ERR_OTA_VALIDATE_FAILED ? EOTA_UPDATE_SIGNATURE_INVALID :
            EOTA_UPDATE_SLOT_UNAVAILABLE;

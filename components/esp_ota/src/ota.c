@@ -9,6 +9,10 @@
 #error "ESP OTA pending-slot confirmation requires bootloader rollback"
 #endif
 
+#if defined(ESP_PLATFORM) && defined(CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK)
+#error "ESP OTA does not support eFuse anti-rollback"
+#endif
+
 static const char *TAG = "eota";
 
 esp_err_t eota_inspect(eota_current_t *ota)
@@ -83,7 +87,7 @@ esp_err_t eota_confirm_pending(eota_current_t *ota)
     }
     const esp_err_t current_result = eota_inspect(ota);
     if (current_result != ESP_OK) return current_result;
-    if (ota->state == EOTA_STATE_VALID || ota->state == EOTA_STATE_UNTRACKED) {
+    if (ota->state == EOTA_STATE_VALID) {
         return ESP_OK;
     }
     if (ota->state != EOTA_STATE_PENDING_VERIFY) {

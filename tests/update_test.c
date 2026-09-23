@@ -34,13 +34,16 @@ static const esp_partition_t wrong_slot = {.type = ESP_PARTITION_TYPE_APP, .subt
 static const esp_partition_t *boot, *selected_slot;
 static uint8_t image_bytes[IMAGE_BYTES], staged_bytes[IMAGE_BYTES];
 static bool valid_old, complete, rollback_possible, bad_chip, fail_restore, fail_read, fail_select;
+static bool fail_mark, mark_then_fail, fail_invalidate;
+static esp_ota_img_states_t old_state;
 static esp_ota_img_states_t target_state;
 static esp_err_t target_lookup;
 static bool stall_headers, stall_first_byte, stall_midbody, early_fin, fin_midbody, select_then_fail;
+static bool select_then_fail_without_switch;
 static bool slow_drip_headers, slow_drip_body;
 static int status_code, init_calls, open_calls, header_calls, read_calls, cleanup_calls;
 static int transport_create_calls, transport_destroy_calls;
-static int begin_calls, write_calls, end_calls, abort_calls, select_calls, restore_calls, partition_reads;
+static int begin_calls, write_calls, end_calls, abort_calls, select_calls, restore_calls, mark_calls, invalidate_calls, partition_reads;
 static int64_t content_length, now_us, read_advance_us;
 static esp_err_t end_result;
 static size_t stream_offset, staged_size;
@@ -77,17 +80,20 @@ static void reset(void)
     boot = &old_slot;
     selected_slot = &new_slot;
     valid_old = complete = rollback_possible = true;
+    old_state = ESP_OTA_IMG_VALID;
     target_state = ESP_OTA_IMG_UNDEFINED;
     target_lookup = ESP_ERR_NOT_FOUND;
     bad_chip = fail_restore = fail_read = fail_select = false;
+    fail_mark = mark_then_fail = fail_invalidate = false;
     stall_headers = stall_first_byte = stall_midbody = early_fin = fin_midbody = select_then_fail = false;
+    select_then_fail_without_switch = false;
     slow_drip_headers = slow_drip_body = false;
     status_code = 200;
     content_length = IMAGE_BYTES;
     end_result = ESP_OK;
     init_calls = open_calls = header_calls = read_calls = cleanup_calls = 0;
     transport_create_calls = transport_destroy_calls = 0;
-    begin_calls = write_calls = end_calls = abort_calls = select_calls = restore_calls = partition_reads = 0;
+    begin_calls = write_calls = end_calls = abort_calls = select_calls = restore_calls = mark_calls = invalidate_calls = partition_reads = 0;
     now_us = read_advance_us = 0;
     stream_offset = staged_size = 0;
     last_progress = 0;
@@ -142,7 +148,7 @@ const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *
 esp_err_t esp_ota_get_state_partition(const esp_partition_t *partition, esp_ota_img_states_t *state)
 {
     assert(partition == &old_slot || partition == &new_slot);
-    if (partition == &old_slot) { *state = valid_old ? ESP_OTA_IMG_VALID : ESP_OTA_IMG_PENDING_VERIFY; return ESP_OK; }
+    if (partition == &old_slot) { *state = valid_old ? old_state : ESP_OTA_IMG_PENDING_VERIFY; return ESP_OK; }
     *state = target_state;
     return target_lookup;
 }
@@ -176,15 +182,37 @@ esp_err_t esp_ota_set_boot_partition(const esp_partition_t *partition)
 {
     if (partition == &new_slot) {
         ++select_calls;
-        if (select_then_fail) { boot = &new_slot; return ESP_FAIL; }
+        if (select_then_fail_without_switch) {
+            target_state = ESP_OTA_IMG_NEW;
+            target_lookup = ESP_OK;
+            return ESP_FAIL;
+        }
+        if (select_then_fail) { boot = &new_slot; target_state = ESP_OTA_IMG_NEW; target_lookup = ESP_OK; return ESP_FAIL; }
         if (fail_select) return ESP_FAIL;
         boot = &new_slot;
+        target_state = ESP_OTA_IMG_NEW;
+        target_lookup = ESP_OK;
         return ESP_OK;
     }
     assert(partition == &old_slot);
     ++restore_calls;
     if (fail_restore) return ESP_FAIL;
     boot = &old_slot;
+    old_state = ESP_OTA_IMG_NEW;
+    return ESP_OK;
+}
+esp_err_t esp_ota_mark_app_valid_cancel_rollback(void)
+{
+    ++mark_calls;
+    if (!fail_mark) old_state = ESP_OTA_IMG_VALID;
+    return fail_mark || mark_then_fail ? ESP_FAIL : ESP_OK;
+}
+esp_err_t esp_ota_invalidate_inactive_ota_data_slot(void)
+{
+    ++invalidate_calls;
+    if (fail_invalidate) return ESP_FAIL;
+    target_state = ESP_OTA_IMG_UNDEFINED;
+    target_lookup = ESP_ERR_NOT_FOUND;
     return ESP_OK;
 }
 esp_err_t esp_partition_read(const esp_partition_t *partition, size_t offset, void *data, size_t size)
@@ -403,9 +431,26 @@ int main(void)
     reset(); fail_select = true;
     assert(run_update(&request) == EOTA_UPDATE_SLOT_UNAVAILABLE && select_calls == 1 && boot == &old_slot);
     reset(); select_then_fail = true;
-    assert(run_update(&request) == EOTA_UPDATE_SLOT_UNAVAILABLE && restore_calls == 1 && boot == &old_slot);
+    assert(run_update(&request) == EOTA_UPDATE_SLOT_UNAVAILABLE && restore_calls == 1 && boot == &old_slot &&
+           old_state == ESP_OTA_IMG_VALID && mark_calls == 1 && invalidate_calls == 1);
+    assert(eota_preflight(&policy, IMAGE_BYTES, &slots) == EOTA_UPDATE_OK);
+    reset(); select_then_fail_without_switch = true;
+    assert(run_update(&request) == EOTA_UPDATE_SLOT_UNAVAILABLE && restore_calls == 0 &&
+           boot == &old_slot && old_state == ESP_OTA_IMG_VALID && mark_calls == 0 &&
+           invalidate_calls == 1);
+    assert(eota_preflight(&policy, IMAGE_BYTES, &slots) == EOTA_UPDATE_OK);
     reset(); rollback_possible = false;
-    assert(run_update(&request) == EOTA_UPDATE_SLOT_UNAVAILABLE && restore_calls == 1 && boot == &old_slot);
+    assert(run_update(&request) == EOTA_UPDATE_SLOT_UNAVAILABLE && restore_calls == 1 && boot == &old_slot &&
+           old_state == ESP_OTA_IMG_VALID && mark_calls == 1 && invalidate_calls == 1);
+    reset(); select_then_fail = true; fail_mark = true;
+    assert(run_update(&request) == EOTA_UPDATE_BOOT_STATE_UNKNOWN && boot == &old_slot &&
+           old_state == ESP_OTA_IMG_NEW && mark_calls == 1);
+    reset(); select_then_fail = true; mark_then_fail = true;
+    assert(run_update(&request) == EOTA_UPDATE_SLOT_UNAVAILABLE && boot == &old_slot &&
+           old_state == ESP_OTA_IMG_VALID && mark_calls == 1 && invalidate_calls == 1);
+    reset(); select_then_fail = true; fail_invalidate = true;
+    assert(run_update(&request) == EOTA_UPDATE_BOOT_STATE_UNKNOWN && boot == &old_slot &&
+           old_state == ESP_OTA_IMG_VALID && target_state == ESP_OTA_IMG_NEW && invalidate_calls == 1);
     reset(); rollback_possible = false; fail_restore = true;
     assert(run_update(&request) == EOTA_UPDATE_BOOT_STATE_UNKNOWN && restore_calls == 1 && boot == &new_slot);
     assert(!fake_transport.alive && transport_create_calls == transport_destroy_calls);

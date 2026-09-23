@@ -23,7 +23,7 @@ flowchart LR
     sample["examples/c3：无私有依赖的实验固件"] --> api
 ```
 
-准备阶段只写 inactive 应用槽并验证完整 signed bin，**不切启动槽**。应用可在两阶段之间持久提交与业务包的绑定；`eota_select` 再核对实际槽、摘要与 IDF 签名，并显式切槽。库不创建 worker、不写业务 NVS、不管理 Wasm 包，也不替应用决定何时确认新固件。具体调用合同见 [API 说明](docs/design/api-contract.md)。
+准备阶段用 IDF 写 inactive 应用槽并验证完整 signed bin，**不切启动槽**；`esp_ota_begin` 可能清除该槽原有的 otadata 记录。应用可在两阶段之间持久提交与业务包的绑定；`eota_select` 再核对实际槽、摘要与 IDF 签名，并显式切槽。切槽失败时库恢复旧运行槽的 VALID 状态并清除未启动候选的 NEW 状态，读回不确定则明确报错。库不创建 worker、不写业务 NVS、不管理 Wasm 包，也不替应用决定何时确认新固件。具体调用合同见 [API 说明](docs/design/api-contract.md)。
 
 ## 独立构建
 
@@ -45,7 +45,7 @@ ctest --test-dir build-real-https --output-on-failure
 
 此入口读取 `IDF_PATH`、核对 `sdk-lock.json`，并使用本机 Python 与 OpenSSL 生成临时测试 CA；不会连接外网或设备。
 
-IDF 组件位于 `components/esp_ota`，`idf_component.yml` 固定 ESP-IDF 6.1.0；[SDK 锁](components/esp_ota/sdk-lock.json)还固定 IDF 完整提交和公开 `esp-lwip` 提交。构建守卫核对两份源码和 lwIP 以外的干净状态，防止用另一套 SDK 误报组合结果。签名 OTA 消费者还须启用 `CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y`；样例默认配置已启用。已备好锁定 SDK 后：
+IDF 组件位于 `components/esp_ota`，`idf_component.yml` 固定 ESP-IDF 6.1.0；[SDK 锁](components/esp_ota/sdk-lock.json)还固定 IDF 完整提交和公开 `esp-lwip` 提交。构建守卫核对两份源码和 lwIP 以外的干净状态，防止用另一套 SDK 误报组合结果。签名 OTA 消费者还须启用 `CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y`；样例默认配置已启用。`CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` 在本组件的 IDF 构建中明确拒绝，因为 SDK 的确认入口在该配置下可能写 eFuse。已备好锁定 SDK 后：
 
 ```bash
 python3 components/esp_ota/tools/check_sdk.py --path "$IDF_PATH"
