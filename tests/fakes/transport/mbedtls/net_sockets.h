@@ -1,0 +1,3 @@
+#pragma once
+#define MBEDTLS_ERR_NET_SEND_FAILED -0x004e
+#define MBEDTLS_ERR_NET_RECV_FAILED -0x004c

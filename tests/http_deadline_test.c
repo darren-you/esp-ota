@@ -160,6 +160,19 @@ int main(void)
     assert(recv(sockets[0], &byte, 1, 0) == 1 && byte == 'q');
     close(sockets[0]);
     close(sockets[1]);
+
+    /* A socket published after DNS time-out must be shut down immediately. */
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    assert(eota_http_deadline_init(&deadline, -1));
+    const int64_t dns_start = esp_timer_get_time();
+    assert(eota_http_deadline_arm(&deadline, dns_start, dns_start, 35, 35));
+    sleep_ms(80);
+    eota_http_deadline_set_socket(&deadline, sockets[0]);
+    assert(!eota_http_deadline_stop(&deadline));
+    assert(recv(sockets[0], &byte, 1, 0) == 0);
+    eota_http_deadline_destroy(&deadline);
+    close(sockets[0]);
+    close(sockets[1]);
     printf("  HTTP socket deadline passed (slow drip cut at %lld ms, %d bytes; cleanup joined)\n",
            (long long)elapsed_ms, received);
 }

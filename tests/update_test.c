@@ -2,6 +2,7 @@
 #include "esp_app_format.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
+#include "http_transport.h"
 #include "esp_timer.h"
 #include "esp_ota_ops.h"
 #include "psa/crypto.h"
@@ -38,6 +39,7 @@ static esp_err_t target_lookup;
 static bool stall_headers, stall_first_byte, stall_midbody, early_fin, fin_midbody, select_then_fail;
 static bool slow_drip_headers, slow_drip_body;
 static int status_code, init_calls, open_calls, header_calls, read_calls, cleanup_calls;
+static int transport_create_calls, transport_destroy_calls;
 static int begin_calls, write_calls, end_calls, abort_calls, select_calls, restore_calls, partition_reads;
 static int64_t content_length, now_us, read_advance_us;
 static esp_err_t end_result;
@@ -51,6 +53,13 @@ struct esp_timer_fake {
 };
 static struct esp_timer_fake fake_timer;
 static int deadline_callbacks;
+struct esp_transport_fake {
+    bool alive;
+    eota_http_deadline_t *deadline;
+    int64_t started_us;
+    int64_t *last_progress_us;
+};
+static struct esp_transport_fake fake_transport;
 
 static void advance_time(int64_t delta_us)
 {
@@ -64,6 +73,7 @@ static void advance_time(int64_t delta_us)
 
 static void reset(void)
 {
+    assert(!fake_transport.alive && transport_create_calls == transport_destroy_calls);
     boot = &old_slot;
     selected_slot = &new_slot;
     valid_old = complete = rollback_possible = true;
@@ -76,12 +86,14 @@ static void reset(void)
     content_length = IMAGE_BYTES;
     end_result = ESP_OK;
     init_calls = open_calls = header_calls = read_calls = cleanup_calls = 0;
+    transport_create_calls = transport_destroy_calls = 0;
     begin_calls = write_calls = end_calls = abort_calls = select_calls = restore_calls = partition_reads = 0;
     now_us = read_advance_us = 0;
     stream_offset = staged_size = 0;
     last_progress = 0;
     deadline_callbacks = 0;
     memset(&fake_timer, 0, sizeof fake_timer);
+    memset(&fake_transport, 0, sizeof fake_transport);
     memset(image_bytes, 0x5a, sizeof image_bytes);
     memset(staged_bytes, 0, sizeof staged_bytes);
     esp_image_header_t header = {.magic = ESP_IMAGE_HEADER_MAGIC, .chip_id = CHIP_ID};
@@ -121,7 +133,7 @@ esp_err_t esp_timer_stop_blocking(esp_timer_handle_t timer, uint32_t timeout_tic
     return ESP_OK;
 }
 esp_err_t esp_timer_delete(esp_timer_handle_t timer)
-{ assert(timer == &fake_timer && !timer->active); return ESP_OK; }
+{ assert(timer == &fake_timer && !timer->active && transport_destroy_calls == 0); return ESP_OK; }
 int esp_crt_bundle_attach(void *config) { (void)config; return 0; }
 const esp_partition_t *esp_ota_get_running_partition(void) { return &old_slot; }
 const esp_partition_t *esp_ota_get_boot_partition(void) { return boot; }
@@ -192,16 +204,42 @@ esp_err_t esp_partition_read(const esp_partition_t *partition, size_t offset, vo
 esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *config)
 {
     ++init_calls;
-    assert(config->url != NULL && config->crt_bundle_attach == esp_crt_bundle_attach);
-    assert(config->disable_auto_redirect && config->timeout_ms == (int)policy.connect_timeout_ms);
+    assert(config->url != NULL && config->transport == &fake_transport);
+    assert(fake_transport.alive && fake_timer.active && transport_create_calls == 1);
+    assert(config->disable_auto_redirect && config->timeout_ms == (int)policy.read_timeout_ms);
+    assert(config->buffer_size == 1024);
     return (void *)1;
 }
-int esp_http_client_get_socket(esp_http_client_handle_t client)
-{ assert(client); return 100000; }
+esp_transport_handle_t eota_http_transport_create(eota_http_deadline_t *deadline,
+                                                   int64_t started_us,
+                                                   int64_t *last_progress_us,
+                                                   uint32_t total_timeout_ms,
+                                                   uint32_t idle_timeout_ms,
+                                                   uint32_t connect_timeout_ms)
+{
+    assert(deadline && deadline->timer == &fake_timer && fake_timer.active);
+    assert(started_us == now_us && last_progress_us && *last_progress_us == started_us);
+    assert(total_timeout_ms == policy.total_timeout_ms &&
+           idle_timeout_ms == policy.idle_timeout_ms &&
+           connect_timeout_ms == policy.connect_timeout_ms);
+    assert(!fake_transport.alive && transport_create_calls == 0);
+    ++transport_create_calls;
+    fake_transport.alive = true;
+    fake_transport.deadline = deadline;
+    fake_transport.started_us = started_us;
+    fake_transport.last_progress_us = last_progress_us;
+    return &fake_transport;
+}
+esp_err_t esp_transport_destroy(esp_transport_handle_t transport)
+{
+    assert(transport == &fake_transport && fake_transport.alive);
+    assert(!fake_timer.active && cleanup_calls == 1 && transport_destroy_calls == 0);
+    fake_transport.alive = false;
+    ++transport_destroy_calls;
+    return ESP_OK;
+}
 esp_err_t esp_http_client_open(esp_http_client_handle_t client, int write_len)
 { assert(client && write_len == 0); ++open_calls; return ESP_OK; }
-esp_err_t esp_http_client_set_timeout_ms(esp_http_client_handle_t client, int timeout_ms)
-{ assert(client && timeout_ms == (int)policy.read_timeout_ms && open_calls == 1); return ESP_OK; }
 int64_t esp_http_client_fetch_headers(esp_http_client_handle_t client)
 {
     assert(client);
@@ -235,12 +273,17 @@ int esp_http_client_read(esp_http_client_handle_t client, char *buffer, int len)
     if (count > sizeof image_bytes - stream_offset) count = sizeof image_bytes - stream_offset;
     memcpy(buffer, image_bytes + stream_offset, count);
     stream_offset += count;
+    if (!eota_http_deadline_progress(fake_transport.deadline, fake_transport.started_us,
+                                     fake_transport.last_progress_us,
+                                     policy.total_timeout_ms, policy.idle_timeout_ms)) {
+        return -ESP_ERR_HTTP_EAGAIN;
+    }
     return (int)count;
 }
 bool esp_http_client_is_complete_data_received(esp_http_client_handle_t client)
 { assert(client); return complete && stream_offset == sizeof image_bytes; }
 esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client)
-{ assert(client); ++cleanup_calls; return ESP_OK; }
+{ assert(client && fake_transport.deadline->timer == NULL && !fake_timer.active && fake_transport.alive && cleanup_calls == 0); ++cleanup_calls; return ESP_OK; }
 psa_status_t psa_hash_setup(psa_hash_operation_t *operation, int algorithm)
 { assert(algorithm == PSA_ALG_SHA_256); operation->sum = 0; return PSA_SUCCESS; }
 psa_status_t psa_crypto_init(void) { return PSA_SUCCESS; }
@@ -365,5 +408,19 @@ int main(void)
     assert(run_update(&request) == EOTA_UPDATE_SLOT_UNAVAILABLE && restore_calls == 1 && boot == &old_slot);
     reset(); rollback_possible = false; fail_restore = true;
     assert(run_update(&request) == EOTA_UPDATE_BOOT_STATE_UNKNOWN && restore_calls == 1 && boot == &new_slot);
+    assert(!fake_transport.alive && transport_create_calls == transport_destroy_calls);
+
+    /* Timer task scheduling may lag behind a byte delivered after the old
+     * idle deadline. Such a byte cannot reset the idle clock. */
+    reset();
+    eota_http_deadline_t delayed_timer = {0};
+    assert(eota_http_deadline_init(&delayed_timer, -1));
+    int64_t delayed_progress_us = now_us;
+    assert(eota_http_deadline_arm(&delayed_timer, now_us, delayed_progress_us, 300000, 30000));
+    now_us = INT64_C(30000001);
+    assert(!eota_http_deadline_progress(&delayed_timer, 0, &delayed_progress_us,
+                                        300000, 30000));
+    assert(delayed_progress_us == 0 && deadline_callbacks == 0);
+    eota_http_deadline_destroy(&delayed_timer);
     puts("  ota_update passed (EAGAIN return, prefix, hash, signature, selector recovery; fake SDK)");
 }

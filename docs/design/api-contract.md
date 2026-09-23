@@ -9,4 +9,8 @@
 
 调用方在同步操作期间持有 URL、policy、进度上下文与唯一 worker，不并发释放或重复写槽。进度回调只在 `eota_prepare` 调用栈内使用，不能重入 `eota_` 或阻塞业务。产品操作 ID、同 ID 去重、NVS 命名空间、配置事务、USB/MQTT/FRP 协议、Container 包槽均不进入本库。
 
-IDF v6.1 的 `esp_http_client_read` 为填满一次请求长度会循环底层读取，header fetch 也可在持续滴流下长期不返回。连接完成并取得当前 socket 后，库在 header/body 阶段将最早的无进展/总期限交给一次性 ESP 定时器；到期回调对该 socket 调用 `shutdown`，SDK 返回后先由 `esp_timer_stop_blocking` 等待回调退出，再清理 HTTP 句柄。host 本地 socket 慢滴流测试证实了此阶段的中断和清理顺序。DNS 解析、首次 `open`、TLS 握手与请求发送仍可能在取得 socket 前阻塞；证书主机名的真实 HTTPS 链路也没有实测。因此接口目前不承诺整个 `eota_prepare` 的严格墙钟上界，主计划 P5-04 未验收。
+IDF v6.1 的 HTTP header、发送与响应体方法都可能在单次调用内多次使用底层传输，不能只给每次调用设置相同的 socket 超时。本仓只保留一个网络路径：官方 `esp_http_client` 负责 HTTP 状态与解析，自有 custom transport 先通过 lwIP 核心线程的异步 DNS API 解析，再以非阻塞 socket 连接，并用 mBed TLS 公共 API 执行 TLS。`CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y` 是签名 OTA 必需配置。TLS 强制 `VERIFY_REQUIRED`、CA bundle 与原 URL 主机名的 SNI/证书名验证；HTTP 客户端保留原 URL 和 Host。
+
+总期限从 DNS 前开始；无进展期限由实际收发的网络字节刷新；DNS、TCP、TLS、请求发送、响应头和响应体共用这两项绝对期限，连接阶段另受 `connect_timeout_ms` 约束。到期定时器仅标记失效并 `shutdown` 已创建的 socket；DNS 迟到回调由独立引用持有上下文，至多保留一个未完成解析。返回后先用 `esp_timer_stop_blocking` 等待回调退出，再让 HTTP 清理并由 custom transport 关闭 socket，避免文件描述符复用竞态。
+
+这些期限约束网络等待和每次调用的返回边界。mBed TLS 单次密码学步骤、已缓存记录解析与 HTTP 解析不能被本库抢占，因此不承诺调度器停止或单步计算跨过期限时的硬实时返回。真实 HTTPS 的 CA、SNI、证书名与长期慢滴流尚无实板运行证据；主计划 P5-04 仍未验收。

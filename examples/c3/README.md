@@ -1,6 +1,6 @@
 # 独立 C3 OTA 样例
 
-此样例在 ESP-IDF v6.1、ESP32-C3、4 MiB Flash 上独立编译，引用同仓 `components/esp_ota`，不读取 Base、私有 Tool 或实际设备资料。默认空输入和未武装模式只打印当前槽状态；不会写应用槽或 otadata。
+此样例在 ESP-IDF v6.1、ESP32-C3、4 MiB Flash 上独立编译，引用同仓 `components/esp_ota`，不读取 Base、私有 Tool 或实际设备资料。默认配置启用 `CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y`，供签名 OTA 的全阶段网络期限使用。默认空输入和未武装模式只打印当前槽状态；不会写应用槽或 otadata。
 
 ## 架构拓扑
 

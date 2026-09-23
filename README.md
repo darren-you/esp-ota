@@ -11,8 +11,9 @@ flowchart LR
     api --> prepare["prepare：HTTPS、镜像头、写槽、整镜像摘要与签名"]
     api --> select["select：重新读回摘要、签名和 boot selector"]
     api --> confirm["inspect / confirm / reject：pending 槽确认或回滚"]
-    prepare --> deadline["http_deadline：连接后 header/body 截止时 shutdown socket"]
-    deadline --> sdk["ESP-IDF v6.1：HTTP、app_update、PSA、Flash"]
+    prepare --> transport["http_transport：异步 DNS、非阻塞 TCP / TLS、请求与响应"]
+    transport --> deadline["http_deadline：全传输期截止时 shutdown socket"]
+    transport --> sdk["ESP-IDF v6.1：HTTP、mBed TLS、app_update、PSA、Flash"]
     select --> sdk
     confirm --> sdk
     lock["sdk-lock.json：IDF 与 esp-lwip 精确源码"] --> sdk
@@ -34,7 +35,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-IDF 组件位于 `components/esp_ota`，`idf_component.yml` 固定 ESP-IDF 6.1.0；[SDK 锁](components/esp_ota/sdk-lock.json)还固定 IDF 完整提交和公开 `esp-lwip` 提交。构建守卫核对两份源码和 lwIP 以外的干净状态，防止用另一套 SDK 误报组合结果。已备好锁定 SDK 后：
+IDF 组件位于 `components/esp_ota`，`idf_component.yml` 固定 ESP-IDF 6.1.0；[SDK 锁](components/esp_ota/sdk-lock.json)还固定 IDF 完整提交和公开 `esp-lwip` 提交。构建守卫核对两份源码和 lwIP 以外的干净状态，防止用另一套 SDK 误报组合结果。签名 OTA 消费者还须启用 `CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y`；样例默认配置已启用。已备好锁定 SDK 后：
 
 ```bash
 python3 components/esp_ota/tools/check_sdk.py --path "$IDF_PATH"
@@ -45,9 +46,9 @@ idf.py -C examples/c3 build
 
 ## 当前验证边界
 
-- host ASan/UBSan 测试覆盖槽预检、准备与切槽分离、镜像头/长度/摘要/签名、HTTP 中断、SDK 错误、恢复读回及 pending 确认；socketpair 慢滴流测试验证连接后定时中断与清理同步。具体见[测试说明](tests/README.md)。
+- host ASan/UBSan 测试覆盖槽预检、准备与切槽分离、镜像头/长度/摘要/签名、HTTP 中断、SDK 错误、恢复读回及 pending 确认；真实 transport 源码配本地 socket 与 TLS/DNS 假件核对超时、迟到回调、慢滴流及清理顺序。具体见[测试说明](tests/README.md)。
 - ESP32-C3 普通构建与使用临时 RSA-3072 测试键的签名构建，只证明组件和样例在固定 SDK 下可编译，不含设备写入。
-- SDK `esp_http_client_read` 和 header fetch 可在单次调用中处理多次底层读取；连接建立后，定时器到期会关闭该 socket 的收发，并在 SDK 返回后等待定时回调退出，再清理 HTTP 句柄。host 测试只证实本地 socket 慢滴流和假件调用层。DNS、首次连接、TLS 握手、请求发送以及证书主机名的真实 HTTPS 链路仍没有完整严格墙钟期限的证明；P5-04 与实板升级、回滚、Base 接入尚未验收。
+- 传输从 DNS 前启动一次性定时器；异步 DNS、非阻塞 TCP、mBed TLS 握手、请求发送、响应头和响应体共用绝对总期限与无进展期限，TCP/TLS 建连另受连接期限约束。到期先标记失效并 `shutdown` 已创建的 socket；调用栈退出后等待定时回调结束，再由传输所有者关闭 socket。TLS 使用默认 CA bundle、强制证书验证及 URL 原主机名的 SNI/证书名校验。密码学单步和 HTTP 解析不是可抢占的实时任务，软件只能在网络 I/O 与调用返回边界执行截止检查。当前 host 故障测试与 C3 编译不能代替真实 HTTPS/实板证据；P5-04 与实板升级、回滚、Base 接入仍未验收。
 
 源码与测试从 Base 已提交源码迁入的来源和改造边界见[来源记录](docs/design/source-provenance.md)。工作区完整阶段与验收条件以[五仓主计划](https://github.com/darren-you/darren-space/blob/master/harness/docs/design/darren-space/global/esp-base-frp-mqtt-ota-container-development-plan.md)为准。
 本轮编译与 host 测试的精确结果见[开发检查点](docs/operations/development-checkpoint.md)。
