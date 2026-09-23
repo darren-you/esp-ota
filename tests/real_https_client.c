@@ -2,13 +2,11 @@
 
 #include <assert.h>
 #include <arpa/inet.h>
-#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 #include "esp_crt_bundle.h"
 #include "esp_transport.h"
@@ -19,108 +17,11 @@
 #include "mbedtls/x509_crt.h"
 #include "psa/crypto.h"
 
-struct esp_timer_fake {
-    pthread_t thread;
-    pthread_mutex_t mutex;
-    pthread_cond_t changed;
-    void (*callback)(void *);
-    void *argument;
-    int64_t alarm_us;
-    bool active;
-    bool executing;
-    bool closed;
-};
-
 int64_t esp_timer_get_time(void)
 {
     struct timespec now;
     assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
     return (int64_t)now.tv_sec * INT64_C(1000000) + now.tv_nsec / 1000;
-}
-
-static void sleep_ms(long milliseconds)
-{
-    const struct timespec pause = {.tv_sec = milliseconds / 1000,
-                                   .tv_nsec = milliseconds % 1000 * 1000000};
-    (void)nanosleep(&pause, NULL);
-}
-
-static void *timer_worker(void *argument)
-{
-    struct esp_timer_fake *timer = argument;
-    pthread_mutex_lock(&timer->mutex);
-    while (!timer->closed) {
-        if (!timer->active) {
-            pthread_cond_wait(&timer->changed, &timer->mutex);
-            continue;
-        }
-        if (esp_timer_get_time() < timer->alarm_us) {
-            pthread_mutex_unlock(&timer->mutex);
-            sleep_ms(1);
-            pthread_mutex_lock(&timer->mutex);
-            continue;
-        }
-        timer->active = false;
-        timer->executing = true;
-        pthread_mutex_unlock(&timer->mutex);
-        timer->callback(timer->argument);
-        pthread_mutex_lock(&timer->mutex);
-        timer->executing = false;
-        pthread_cond_broadcast(&timer->changed);
-    }
-    pthread_mutex_unlock(&timer->mutex);
-    return NULL;
-}
-
-esp_err_t esp_timer_create(const esp_timer_create_args_t *args, esp_timer_handle_t *out)
-{
-    assert(args && args->callback && args->dispatch_method == ESP_TIMER_TASK && out);
-    struct esp_timer_fake *timer = calloc(1, sizeof *timer);
-    if (!timer) return ESP_ERR_NO_MEM;
-    timer->callback = args->callback;
-    timer->argument = args->arg;
-    assert(pthread_mutex_init(&timer->mutex, NULL) == 0);
-    assert(pthread_cond_init(&timer->changed, NULL) == 0);
-    assert(pthread_create(&timer->thread, NULL, timer_worker, timer) == 0);
-    *out = timer;
-    return ESP_OK;
-}
-
-esp_err_t esp_timer_start_once(esp_timer_handle_t timer, uint64_t timeout_us)
-{
-    assert(timer && timeout_us > 0);
-    pthread_mutex_lock(&timer->mutex);
-    assert(!timer->active && !timer->executing);
-    timer->alarm_us = esp_timer_get_time() + (int64_t)timeout_us;
-    timer->active = true;
-    pthread_cond_signal(&timer->changed);
-    pthread_mutex_unlock(&timer->mutex);
-    return ESP_OK;
-}
-
-esp_err_t esp_timer_stop_blocking(esp_timer_handle_t timer, uint32_t ticks)
-{
-    assert(timer && ticks == UINT32_MAX);
-    pthread_mutex_lock(&timer->mutex);
-    timer->active = false;
-    while (timer->executing) pthread_cond_wait(&timer->changed, &timer->mutex);
-    pthread_mutex_unlock(&timer->mutex);
-    return ESP_OK;
-}
-
-esp_err_t esp_timer_delete(esp_timer_handle_t timer)
-{
-    assert(timer);
-    pthread_mutex_lock(&timer->mutex);
-    assert(!timer->active && !timer->executing);
-    timer->closed = true;
-    pthread_cond_signal(&timer->changed);
-    pthread_mutex_unlock(&timer->mutex);
-    assert(pthread_join(timer->thread, NULL) == 0);
-    assert(pthread_cond_destroy(&timer->changed) == 0);
-    assert(pthread_mutex_destroy(&timer->mutex) == 0);
-    free(timer);
-    return ESP_OK;
 }
 
 struct semaphore_fake { bool signaled; };
@@ -203,13 +104,10 @@ int main(int argc, char **argv)
     mbedtls_x509_crt_init(&test_ca);
     assert(mbedtls_x509_crt_parse_file(&test_ca, ca_path) == 0);
 
-    const int64_t started_us = esp_timer_get_time();
-    int64_t last_progress_us = started_us;
     eota_http_deadline_t deadline;
-    assert(eota_http_deadline_init(&deadline));
-    assert(eota_http_deadline_arm(&deadline, started_us, last_progress_us, total_ms, idle_ms));
-    esp_transport_handle_t transport = eota_http_transport_create(&deadline, started_us,
-        &last_progress_us, total_ms, idle_ms, total_ms);
+    assert(eota_http_deadline_init(&deadline, total_ms, idle_ms));
+    const int64_t started_us = deadline.started_us;
+    esp_transport_handle_t transport = eota_http_transport_create(&deadline, total_ms);
     assert(transport);
 
     const char *stage = "connect";
@@ -243,8 +141,7 @@ int main(int argc, char **argv)
         if (strstr(received, "hello") == NULL) success = false;
     }
     const int64_t elapsed_ms = (esp_timer_get_time() - started_us) / 1000;
-    if (!eota_http_deadline_stop(&deadline)) success = false;
-    eota_http_deadline_destroy(&deadline);
+    if (eota_http_deadline_remaining_us(&deadline) <= 0) success = false;
     transport->close(transport);
     esp_transport_destroy(transport);
     mbedtls_x509_crt_free(&test_ca);

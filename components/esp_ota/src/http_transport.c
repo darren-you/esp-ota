@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "esp_crt_bundle.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "lwip/dns.h"
@@ -33,11 +34,7 @@ typedef struct {
 
 typedef struct {
     eota_http_deadline_t *deadline;
-    int64_t started_us;
     int64_t connect_started_us;
-    int64_t *last_progress_us;
-    uint32_t total_timeout_ms;
-    uint32_t idle_timeout_ms;
     uint32_t connect_timeout_ms;
     int socket_fd;
     bool tls_initialized;
@@ -91,14 +88,8 @@ static void dns_start(void *argument)
 
 static int64_t remaining_us(const eota_http_transport_t *transport, bool connecting)
 {
-    if (!eota_http_deadline_alive(transport->deadline)) return 0;
     const int64_t now = esp_timer_get_time();
-    if (now < transport->started_us || now < *transport->last_progress_us) return 0;
-    int64_t left = (int64_t)transport->total_timeout_ms * 1000 -
-                   (now - transport->started_us);
-    const int64_t idle = (int64_t)transport->idle_timeout_ms * 1000 -
-                         (now - *transport->last_progress_us);
-    if (idle < left) left = idle;
+    int64_t left = eota_http_deadline_remaining_us_at(transport->deadline, now);
     if (connecting) {
         if (now < transport->connect_started_us) return 0;
         const int64_t connect = (int64_t)transport->connect_timeout_ms * 1000 -
@@ -110,10 +101,7 @@ static int64_t remaining_us(const eota_http_transport_t *transport, bool connect
 
 static bool note_progress(eota_http_transport_t *transport)
 {
-    return eota_http_deadline_progress(transport->deadline, transport->started_us,
-                                       transport->last_progress_us,
-                                       transport->total_timeout_ms,
-                                       transport->idle_timeout_ms);
+    return eota_http_deadline_progress(transport->deadline);
 }
 
 static bool resolve_host(eota_http_transport_t *transport, const char *hostname,
@@ -350,8 +338,7 @@ static int transport_close(esp_transport_handle_t handle)
 {
     (void)handle;
     /* This OTA transport is single-use. HTTP may call close on an error while
-     * the deadline is active; defer the lwIP close until the owner has joined
-     * the timer and destroyed the HTTP client. */
+     * unwinding; its owner releases the socket in transport_destroy. */
     return 0;
 }
 
@@ -370,14 +357,10 @@ static int transport_destroy(esp_transport_handle_t handle)
 }
 
 esp_transport_handle_t eota_http_transport_create(eota_http_deadline_t *deadline,
-                                                   int64_t started_us,
-                                                   int64_t *last_progress_us,
-                                                   uint32_t total_timeout_ms,
-                                                   uint32_t idle_timeout_ms,
                                                    uint32_t connect_timeout_ms)
 {
-    if (deadline == NULL || last_progress_us == NULL || total_timeout_ms == 0 ||
-        idle_timeout_ms == 0 || connect_timeout_ms == 0) return NULL;
+    if (deadline == NULL || connect_timeout_ms == 0 ||
+        eota_http_deadline_remaining_us(deadline) <= 0) return NULL;
     esp_transport_handle_t handle = esp_transport_init();
     if (handle == NULL) return NULL;
     eota_http_transport_t *transport = calloc(1, sizeof *transport);
@@ -386,10 +369,6 @@ esp_transport_handle_t eota_http_transport_create(eota_http_deadline_t *deadline
         return NULL;
     }
     transport->deadline = deadline;
-    transport->started_us = started_us;
-    transport->last_progress_us = last_progress_us;
-    transport->total_timeout_ms = total_timeout_ms;
-    transport->idle_timeout_ms = idle_timeout_ms;
     transport->connect_timeout_ms = connect_timeout_ms;
     transport->socket_fd = -1;
     if (esp_transport_set_context_data(handle, transport) != ESP_OK) {

@@ -39,3 +39,11 @@
 在旧实现上先加入回归：35 毫秒到期后检查 socket 仍可由调用方持有；`http_deadline` 1/1 按预期失败，因定时回调将 socket `shutdown` 成 EOF。随后删除回调与 transport close 中的 `shutdown`，移除定时器对文件描述符的所有权；回调仅设置到期原子标志，非阻塞 I/O 和有限 `select` 等待按原有绝对期限结束，HTTP 清理留给同步调用方。新回归、原有 HTTP 故障测试和固定 SDK mbedTLS 4.1 的真实 HTTPS 回环在 AppleClang ASan/UBSan 下 5/5 通过。固定 SDK 的普通 ESP32-C3 样例编译通过，镜像 `0x287d0` 字节，SHA-256 `6024a3b0e2bf1cadc4ad6334161dff243b502a97bd73be006714fcfc4e7aa398`；仓外临时 RSA-3072 测试键的签名 C3 镜像为 `0x31000` 字节，SHA-256 `335a720d7a6495d80895eb4104f52c21168ed464970c0ce336767b429201e43e`，本机 `espsecure verify-signature --version 2` 验证 RSA 签名有效。没有设备写入、eFuse 操作或生产密钥使用。
 
 这项修正只去除定时回调自身的无界 TCP/IP 等待。固定 lwIP 的 `socket` 创建和 `close` 仍可能等待 TCP/IP 线程，mBed TLS 单步、HTTP 解析、Flash 写入和任务调度也不可由 OTA 库抢占。30 秒无进展与 5 分钟总期限因此是正常调度下网络 I/O 的截止检查，不能声称为整个 `eota_prepare` 的严格墙钟返回保证。P5-04 仍须在受控 C3 与 HTTPS 服务上验证 DNS、握手、响应头/体慢滴流、断流、完整镜像及清理读回，并保留设备恢复基线；该阶段未验收。
+
+## P5-04 单调时钟期限收敛（2026-09-24）
+
+复查上节的候选实现后确认：定时回调仅设置 `expired`，不能中断正在执行的 SDK 调用；DNS 等待、非阻塞 socket 的 `select` 和 HTTP 调用前后都已通过 `esp_timer_get_time` 检查同一组绝对期限。该定时器不能提供额外的返回上界，却仍需创建、反复重臂，并在清理时通过 `esp_timer_stop_blocking(portMAX_DELAY)` 等待共用 timer TASK。因此删除定时器与其假件，改由一份期限状态记录 DNS 前的起点和最后一次有效网络进展时刻；进展先检查旧无进展期限，再更新时间。DNS、连接、TLS、HTTP 各阶段和准备阶段都消费该状态，保留有限 `select` 等待及调用方同步清理。
+
+AppleClang ASan/UBSan host CTest 5/5 通过，包括可控时钟对迟到字节、持续慢滴流总期限和时钟异常的检查、DNS 迟到回调与排队取消、TCP/TLS/收发故障、SDK 内慢滴流、固定 SDK mbedTLS 4.1 的真实 HTTPS 回环。固定公开 SDK `855937cf9dcee13ee9c423fb0319238cdc8d53fd` 下普通 ESP32-C3 样例编译通过，镜像 `0x287d0` 字节，SHA-256 `6024a3b0e2bf1cadc4ad6334161dff243b502a97bd73be006714fcfc4e7aa398`；仓外临时 RSA-3072 测试键的签名样例镜像为 `0x31000` 字节，SHA-256 `1fda3da65d4212ecbc677e4e6a331af1a3adfaf431fbde1e97cd0b9180b3db7f`，本机 `espsecure verify-signature --version 2 --keyfile` 验证 RSA 签名有效。没有设备写入、eFuse 操作或生产密钥使用。
+
+这一收敛减少了共用 timer TASK 与清理等待的依赖，但不改变固定 SDK `close`/HTTP/TLS、Flash 与任务调度不可抢占的事实；仍不能给整个 `eota_prepare` 承诺严格的 30 秒无进展或 5 分钟墙钟返回上界。P5-04 保持未验收，实板与完整 HTTPS/Flash/bootloader 链路仍按上节条件验证。

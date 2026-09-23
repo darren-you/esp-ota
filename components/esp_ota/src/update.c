@@ -155,15 +155,6 @@ static bool valid_url(const char *url)
     return true;
 }
 
-static bool within_download_deadline(const eota_policy_t *policy, int64_t started_us,
-                                     int64_t last_progress_us)
-{
-    const int64_t now_us = esp_timer_get_time();
-    return now_us >= started_us && now_us - started_us < (int64_t)policy->total_timeout_ms * 1000 &&
-           now_us >= last_progress_us &&
-           now_us - last_progress_us < (int64_t)policy->idle_timeout_ms * 1000;
-}
-
 static eota_result_t hash_partition(const esp_partition_t *partition, uint32_t size,
                                     uint8_t digest[EOTA_SHA256_BYTES])
 {
@@ -268,14 +259,9 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     esp_transport_handle_t transport = NULL;
     esp_http_client_handle_t client = NULL;
     result = EOTA_UPDATE_RESOURCE_FAILURE;
-    const int64_t started_us = esp_timer_get_time();
-    int64_t last_progress_us = started_us;
-    if (!eota_http_deadline_init(&deadline)) goto abort;
-    if (!eota_http_deadline_arm(&deadline, started_us, last_progress_us,
-                                policy->total_timeout_ms, policy->idle_timeout_ms)) goto abort;
-    transport = eota_http_transport_create(&deadline, started_us, &last_progress_us,
-                                            policy->total_timeout_ms, policy->idle_timeout_ms,
-                                            policy->connect_timeout_ms);
+    if (!eota_http_deadline_init(&deadline, policy->total_timeout_ms,
+                                 policy->idle_timeout_ms)) goto abort;
+    transport = eota_http_transport_create(&deadline, policy->connect_timeout_ms);
     if (transport == NULL) goto abort;
     const esp_http_client_config_t http = {
         .url = image->image_url,
@@ -287,14 +273,14 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     client = esp_http_client_init(&http);
     if (client == NULL) goto abort;
     result = EOTA_UPDATE_DOWNLOAD_FAILED;
-    if (!within_download_deadline(policy, started_us, last_progress_us) ||
+    if (eota_http_deadline_remaining_us(&deadline) <= 0 ||
         esp_http_client_open(client, 0) != ESP_OK ||
-        !within_download_deadline(policy, started_us, last_progress_us)) goto abort;
+        eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
     int64_t content_length;
     do {
-        if (!within_download_deadline(policy, started_us, last_progress_us)) goto abort;
+        if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
         content_length = esp_http_client_fetch_headers(client);
-        if (!within_download_deadline(policy, started_us, last_progress_us)) goto abort;
+        if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
     } while (content_length == -ESP_ERR_HTTP_EAGAIN);
     if (content_length != image->image_size_bytes ||
         esp_http_client_get_status_code(client) != 200 ||
@@ -306,7 +292,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     size_t write_used = 0;
     uint32_t received = 0;
     while (received < image->image_size_bytes) {
-        if (!within_download_deadline(policy, started_us, last_progress_us)) goto abort;
+        if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
         const uint32_t left = image->image_size_bytes - received;
         size_t wanted = left < sizeof buffer ? left : sizeof buffer;
         if (received < sizeof prefix && wanted > sizeof prefix - received) {
@@ -315,7 +301,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
             wanted = sizeof write_buffer - write_used;
         }
         const int count = esp_http_client_read(client, (char *)buffer, (int)wanted);
-        if (!within_download_deadline(policy, started_us, last_progress_us)) goto abort;
+        if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
         if (count == -ESP_ERR_HTTP_EAGAIN) continue;
         if (count <= 0 || (size_t)count > wanted) goto abort;
         if (received < sizeof prefix) {
@@ -329,7 +315,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
             }
         }
         received += (uint32_t)count;
-        if (!within_download_deadline(policy, started_us, last_progress_us)) goto abort;
+        if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
         if (received == sizeof prefix) {
             esp_image_header_t image_header;
             esp_app_desc_t app_desc;
@@ -352,11 +338,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
         if (progress != NULL) progress(received, image->image_size_bytes, context);
     }
     if (!esp_http_client_is_complete_data_received(client) ||
-        !within_download_deadline(policy, started_us, last_progress_us)) goto abort;
-    /* The transfer is complete. Join the timer callback before releasing its
-     * stack-owned deadline argument and cleaning up HTTP. */
-    if (!eota_http_deadline_stop(&deadline)) goto abort;
-    eota_http_deadline_destroy(&deadline);
+        eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
     (void)esp_http_client_cleanup(client);
     client = NULL;
     (void)esp_transport_destroy(transport);
@@ -380,7 +362,6 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     return EOTA_UPDATE_OK;
 abort:
     if (ota_started) (void)esp_ota_abort(handle);
-    eota_http_deadline_destroy(&deadline);
     if (client != NULL) (void)esp_http_client_cleanup(client);
     if (transport != NULL) (void)esp_transport_destroy(transport);
     return result;

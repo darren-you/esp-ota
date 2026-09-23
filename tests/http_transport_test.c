@@ -9,18 +9,6 @@
 #include <time.h>
 #include <unistd.h>
 
-struct esp_timer_fake {
-    pthread_t thread;
-    pthread_mutex_t mutex;
-    pthread_cond_t changed;
-    void (*callback)(void *);
-    void *argument;
-    int64_t alarm_us;
-    bool active;
-    bool executing;
-    bool closed;
-};
-
 int64_t esp_timer_get_time(void)
 {
     struct timespec now;
@@ -32,84 +20,6 @@ static void sleep_ms(long ms)
 {
     const struct timespec pause = {.tv_sec = ms / 1000, .tv_nsec = ms % 1000 * 1000000};
     (void)nanosleep(&pause, NULL);
-}
-
-static void *timer_worker(void *argument)
-{
-    struct esp_timer_fake *timer = argument;
-    pthread_mutex_lock(&timer->mutex);
-    while (!timer->closed) {
-        if (!timer->active) {
-            pthread_cond_wait(&timer->changed, &timer->mutex);
-            continue;
-        }
-        if (esp_timer_get_time() < timer->alarm_us) {
-            pthread_mutex_unlock(&timer->mutex);
-            sleep_ms(1);
-            pthread_mutex_lock(&timer->mutex);
-            continue;
-        }
-        timer->active = false;
-        timer->executing = true;
-        pthread_mutex_unlock(&timer->mutex);
-        timer->callback(timer->argument);
-        pthread_mutex_lock(&timer->mutex);
-        timer->executing = false;
-        pthread_cond_broadcast(&timer->changed);
-    }
-    pthread_mutex_unlock(&timer->mutex);
-    return NULL;
-}
-
-esp_err_t esp_timer_create(const esp_timer_create_args_t *args, esp_timer_handle_t *out)
-{
-    assert(args && args->callback && args->dispatch_method == ESP_TIMER_TASK && out);
-    struct esp_timer_fake *timer = calloc(1, sizeof *timer);
-    if (!timer) return ESP_ERR_NO_MEM;
-    timer->callback = args->callback;
-    timer->argument = args->arg;
-    assert(pthread_mutex_init(&timer->mutex, NULL) == 0);
-    assert(pthread_cond_init(&timer->changed, NULL) == 0);
-    assert(pthread_create(&timer->thread, NULL, timer_worker, timer) == 0);
-    *out = timer;
-    return ESP_OK;
-}
-
-esp_err_t esp_timer_start_once(esp_timer_handle_t timer, uint64_t timeout_us)
-{
-    assert(timer && timeout_us > 0);
-    pthread_mutex_lock(&timer->mutex);
-    assert(!timer->active && !timer->executing);
-    timer->alarm_us = esp_timer_get_time() + (int64_t)timeout_us;
-    timer->active = true;
-    pthread_cond_signal(&timer->changed);
-    pthread_mutex_unlock(&timer->mutex);
-    return ESP_OK;
-}
-
-esp_err_t esp_timer_stop_blocking(esp_timer_handle_t timer, uint32_t timeout_ticks)
-{
-    assert(timer && timeout_ticks == UINT32_MAX);
-    pthread_mutex_lock(&timer->mutex);
-    timer->active = false;
-    while (timer->executing) pthread_cond_wait(&timer->changed, &timer->mutex);
-    pthread_mutex_unlock(&timer->mutex);
-    return ESP_OK;
-}
-
-esp_err_t esp_timer_delete(esp_timer_handle_t timer)
-{
-    assert(timer);
-    pthread_mutex_lock(&timer->mutex);
-    assert(!timer->active && !timer->executing);
-    timer->closed = true;
-    pthread_cond_signal(&timer->changed);
-    pthread_mutex_unlock(&timer->mutex);
-    assert(pthread_join(timer->thread, NULL) == 0);
-    assert(pthread_cond_destroy(&timer->changed) == 0);
-    assert(pthread_mutex_destroy(&timer->mutex) == 0);
-    free(timer);
-    return ESP_OK;
 }
 
 #include "http_transport.h"
@@ -230,10 +140,9 @@ static void wait_dns(void) { for(int i=0;i<500 && atomic_load(&dns_pending);i++)
 static void run_case(const char *name,int port,int total_ms,int connect_ms,int expected_connect,int mode,int server_delay_ms) {
     (void)server_delay_ms;
     atomic_store(&tls_mode,mode);
-    eota_http_deadline_t deadline; assert(eota_http_deadline_init(&deadline));
-    int64_t start=esp_timer_get_time(),progress=start;
-    assert(eota_http_deadline_arm(&deadline,start,progress,total_ms,total_ms));
-    esp_transport_handle_t transport=eota_http_transport_create(&deadline,start,&progress,total_ms,total_ms,connect_ms);assert(transport);
+    eota_http_deadline_t deadline; assert(eota_http_deadline_init(&deadline,total_ms,total_ms));
+    int64_t start=deadline.started_us;
+    esp_transport_handle_t transport=eota_http_transport_create(&deadline,connect_ms);assert(transport);
     int connected=transport->connect(transport,name,port,1000);
     assert((connected==0)==expected_connect);
     if(connected<0 && mode==TLS_SLOW_HANDSHAKE) { int64_t elapsed=(esp_timer_get_time()-start)/1000;assert(elapsed>=65 && elapsed<220); }
@@ -245,19 +154,7 @@ static void run_case(const char *name,int port,int total_ms,int connect_ms,int e
         }
         transport->close(transport);
     }
-    (void)eota_http_deadline_stop(&deadline);
-    eota_http_deadline_destroy(&deadline);
     assert(esp_transport_destroy(transport)==ESP_OK);
-}
-static void test_fd_reuse(void) {
-    int pair[2];assert(socketpair(AF_UNIX,SOCK_STREAM,0,pair)==0);
-    int old_fd=pair[0];eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline));
-    int64_t now=esp_timer_get_time();assert(eota_http_deadline_arm(&deadline,now,now,120,120));
-    assert(eota_http_deadline_stop(&deadline));eota_http_deadline_destroy(&deadline);
-    close(pair[0]);close(pair[1]);assert(socketpair(AF_UNIX,SOCK_STREAM,0,pair)==0);
-    assert(dup2(pair[0],old_fd)==old_fd);if(pair[0]!=old_fd) close(pair[0]);
-    sleep_ms(150);char byte;assert(send(pair[1],"z",1,0)==1);
-    assert(recv(old_fd,&byte,1,0)==1 && byte=='z');close(old_fd);close(pair[1]);
 }
 static void test_read_result_contract(void) {
     int port;
@@ -265,10 +162,8 @@ static void test_read_result_contract(void) {
     server.listener=listen_loopback(&port);
     pthread_t thread;assert(pthread_create(&thread,NULL,serve,&server)==0);
     atomic_store(&tls_mode,TLS_NORMAL);
-    eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline));
-    int64_t start=esp_timer_get_time(),progress=start;
-    assert(eota_http_deadline_arm(&deadline,start,progress,500,300));
-    esp_transport_handle_t transport=eota_http_transport_create(&deadline,start,&progress,500,300,150);
+    eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline,500,300));
+    esp_transport_handle_t transport=eota_http_transport_create(&deadline,150);
     assert(transport && transport->connect(transport,"localhost",port,150)==0);
     char byte;
     /* A per-read timeout must remain retryable until the idle deadline. */
@@ -277,8 +172,6 @@ static void test_read_result_contract(void) {
     assert(transport->read(transport,&byte,1,200)==ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN);
     atomic_store(&tls_mode,TLS_FATAL_READ);
     assert(transport->read(transport,&byte,1,20)==ERR_TCP_TRANSPORT_CONNECTION_FAILED);
-    (void)eota_http_deadline_stop(&deadline);
-    eota_http_deadline_destroy(&deadline);
     assert(esp_transport_destroy(transport)==ESP_OK);
     pthread_join(thread,NULL);close(server.listener);
     atomic_store(&tls_mode,TLS_NORMAL);
@@ -288,10 +181,9 @@ static void test_absolute_read_deadline(int total_ms,int idle_ms) {
     server_t server={.handshake=true,.single_reply=true,.reply_delay_ms=600};
     server.listener=listen_loopback(&port);
     pthread_t thread;assert(pthread_create(&thread,NULL,serve,&server)==0);
-    eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline));
-    int64_t start=esp_timer_get_time(),progress=start;
-    assert(eota_http_deadline_arm(&deadline,start,progress,total_ms,idle_ms));
-    esp_transport_handle_t transport=eota_http_transport_create(&deadline,start,&progress,total_ms,idle_ms,100);
+    eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline,total_ms,idle_ms));
+    int64_t start=deadline.started_us;
+    esp_transport_handle_t transport=eota_http_transport_create(&deadline,100);
     assert(transport && transport->connect(transport,"localhost",port,100)==0);
     char byte;int retries=0,result;
     do {
@@ -301,8 +193,6 @@ static void test_absolute_read_deadline(int total_ms,int idle_ms) {
     assert(retries>=2 && result==ERR_TCP_TRANSPORT_CONNECTION_FAILED);
     int64_t elapsed_ms=(esp_timer_get_time()-start)/1000;
     assert(elapsed_ms>=160 && elapsed_ms<1000);
-    (void)eota_http_deadline_stop(&deadline);
-    eota_http_deadline_destroy(&deadline);
     assert(esp_transport_destroy(transport)==ESP_OK);
     pthread_join(thread,NULL);close(server.listener);
 }
@@ -346,9 +236,8 @@ int main(void) {
     run_case("localhost",port,400,200,0,TLS_VERIFY_FAIL,0);
     assert(atomic_load(&verification_checks)==checks_before+1);
     atomic_store(&verification_flags,0);pthread_join(thread,NULL);close(bad_cert.listener);
-    test_fd_reuse();
     test_read_result_contract();
     test_absolute_read_deadline(240,500);
     test_absolute_read_deadline(500,240);
-    puts("  transport DNS, TCP, TLS, write/read deadlines and FD reuse passed");return 0;
+    puts("  transport DNS, TCP, TLS and write/read deadlines passed");return 0;
 }

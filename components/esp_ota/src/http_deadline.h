@@ -3,21 +3,17 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdatomic.h>
-
-#include "esp_timer.h"
-
-/* Owns only the timer. The HTTP owner joins it before freeing the transport. */
+/* One monotonic clock origin and the last accepted network byte. */
 typedef struct {
-    esp_timer_handle_t timer;
-    atomic_bool expired;
+    int64_t started_us;
+    int64_t last_progress_us;
+    uint32_t total_timeout_ms;
+    uint32_t idle_timeout_ms;
 } eota_http_deadline_t;
 
-bool eota_http_deadline_init(eota_http_deadline_t *deadline);
-bool eota_http_deadline_arm(eota_http_deadline_t *deadline, int64_t started_us,
-                            int64_t last_progress_us, uint32_t total_ms, uint32_t idle_ms);
-bool eota_http_deadline_stop(eota_http_deadline_t *deadline);
-bool eota_http_deadline_alive(const eota_http_deadline_t *deadline);
-bool eota_http_deadline_progress(eota_http_deadline_t *deadline, int64_t started_us,
-                                int64_t *last_progress_us, uint32_t total_ms, uint32_t idle_ms);
-void eota_http_deadline_destroy(eota_http_deadline_t *deadline);
+bool eota_http_deadline_init(eota_http_deadline_t *deadline, uint32_t total_timeout_ms,
+                             uint32_t idle_timeout_ms);
+int64_t eota_http_deadline_remaining_us_at(const eota_http_deadline_t *deadline,
+                                           int64_t now_us);
+int64_t eota_http_deadline_remaining_us(const eota_http_deadline_t *deadline);
+bool eota_http_deadline_progress(eota_http_deadline_t *deadline);

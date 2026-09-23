@@ -12,7 +12,8 @@ flowchart LR
     api --> select["select：重新读回摘要、签名和 boot selector"]
     api --> confirm["inspect / confirm / reject：pending 槽确认或回滚"]
     prepare --> transport["http_transport：异步 DNS、非阻塞 TCP / TLS、请求与响应"]
-    transport --> deadline["http_deadline：全传输期单调时钟与到期标记"]
+    prepare --> deadline
+    transport --> deadline["http_deadline：全传输期单调时钟与绝对期限"]
     transport --> sdk["ESP-IDF v6.1：HTTP、mBed TLS、app_update、PSA、Flash"]
     select --> sdk
     confirm --> sdk
@@ -58,7 +59,7 @@ idf.py -C examples/c3 build
 
 - host ASan/UBSan 测试覆盖槽预检、准备与切槽分离、镜像头/长度/摘要/签名、HTTP 中断、SDK 错误、恢复读回及 pending 确认；真实 transport 源码配本地 socket 与 TLS/DNS 假件核对超时、迟到回调、慢滴流及清理顺序。另有固定 SDK 源码构建的真实 mbedTLS HTTPS 回环，验证 CA、SNI/证书名、握手期限及响应慢滴流；测试 CA 通过 host 适配入口注入，未调用设备侧证书 bundle。具体见[测试说明](tests/README.md)。
 - ESP32-C3 普通构建与使用临时 RSA-3072 测试键的签名构建，只证明组件和样例在固定 SDK 下可编译，不含设备写入。
-- 传输从 DNS 前启动一次性定时器；异步 DNS、非阻塞 TCP、mBed TLS 握手、请求发送、响应头和响应体共用绝对总期限与无进展期限，TCP/TLS 建连另受连接期限约束。到期回调只标记失效；网络等待使用单调时钟剩余时间作为 `select` 上限，每次返回再检查期限。调用栈退出后等待定时回调结束，再由传输所有者关闭 socket。设备侧 TLS 使用默认 CA bundle、强制证书验证及 URL 原主机名的 SNI/证书名校验。固定 SDK 的 `shutdown`/`close`、密码学单步及 HTTP 解析不能由本库抢占，30 秒无进展和 5 分钟总期限不构成 `eota_prepare` 的严格墙钟返回保证。真实 HTTPS host 回环与 C3 编译仍不能代替设备上的完整 HTTP/Flash/bootloader 证据；P5-04 与实板升级、回滚、Base 接入仍未验收。
+- 传输从 DNS 前记录单调时钟起点；异步 DNS、非阻塞 TCP、mBed TLS 握手、请求发送、响应头和响应体共用绝对总期限与无进展期限，TCP/TLS 建连另受连接期限约束。每次网络等待按绝对期限的剩余时间设置 `select` 上限，返回后重新读钟；到达旧无进展期限的迟到字节不能刷新期限。传输不创建到期定时器，调用栈退出后由传输所有者关闭 socket。设备侧 TLS 使用默认 CA bundle、强制证书验证及 URL 原主机名的 SNI/证书名校验。固定 SDK 的 `close`、密码学单步及 HTTP 解析不能由本库抢占，30 秒无进展和 5 分钟总期限不构成 `eota_prepare` 的严格墙钟返回保证。真实 HTTPS host 回环与 C3 编译仍不能代替设备上的完整 HTTP/Flash/bootloader 证据；P5-04 与实板升级、回滚、Base 接入仍未验收。
 
 源码与测试从 Base 已提交源码迁入的来源和改造边界见[来源记录](docs/design/source-provenance.md)。工作区完整阶段与验收条件以[五仓主计划](https://github.com/darren-you/darren-space/blob/master/harness/docs/design/darren-space/global/esp-base-frp-mqtt-ota-container-development-plan.md)为准。
 本轮编译与 host 测试的精确结果见[开发检查点](docs/operations/development-checkpoint.md)。

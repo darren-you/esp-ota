@@ -21,7 +21,6 @@ if(BUILD_TESTING)
     target_include_directories(eota_http_deadline_test PRIVATE components/esp_ota/src
         tests/fakes/ota_update tests/fakes)
     target_compile_options(eota_http_deadline_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-    target_link_libraries(eota_http_deadline_test PRIVATE Threads::Threads)
     add_test(NAME http_deadline COMMAND eota_http_deadline_test)
 
     add_executable(eota_confirmation_test components/esp_ota/src/ota.c tests/ota_test.c)
