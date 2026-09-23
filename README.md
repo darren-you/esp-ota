@@ -49,5 +49,5 @@ idf.py -C examples/c3 build
 - ESP32-C3 普通构建与使用临时 RSA-3072 测试键的签名构建，只证明组件和样例在固定 SDK 下可编译，不含设备写入。
 - SDK `esp_http_client_read` 和 header fetch 可在单次调用中处理多次底层读取；连接建立后，定时器到期会关闭该 socket 的收发，并在 SDK 返回后等待定时回调退出，再清理 HTTP 句柄。host 测试只证实本地 socket 慢滴流和假件调用层。DNS、首次连接、TLS 握手、请求发送以及证书主机名的真实 HTTPS 链路仍没有完整严格墙钟期限的证明；P5-04 与实板升级、回滚、Base 接入尚未验收。
 
-源码与测试从 Base 当前工作树迁入的来源和改造边界见[来源记录](docs/design/source-provenance.md)。工作区完整阶段与验收条件以[五仓主计划](https://github.com/darren-you/darren-space/blob/master/harness/docs/design/darren-space/global/esp-base-frp-mqtt-ota-container-development-plan.md)为准。
+源码与测试从 Base 已提交源码迁入的来源和改造边界见[来源记录](docs/design/source-provenance.md)。工作区完整阶段与验收条件以[五仓主计划](https://github.com/darren-you/darren-space/blob/master/harness/docs/design/darren-space/global/esp-base-frp-mqtt-ota-container-development-plan.md)为准。
 本轮编译与 host 测试的精确结果见[开发检查点](docs/operations/development-checkpoint.md)。
