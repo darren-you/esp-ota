@@ -25,6 +25,7 @@
 #if EOTA_SIGNED_ENABLED
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
+#include "esp_image_format.h"
 #include "esp_http_client.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -224,6 +225,7 @@ const char *eota_error(eota_result_t result)
     case EOTA_UPDATE_SIGNATURE_INVALID: return "ota_signature_invalid";
     case EOTA_UPDATE_BOOT_STATE_UNKNOWN: return "ota_boot_state_unknown";
     case EOTA_UPDATE_RESOURCE_FAILURE: return "resource_failure";
+    case EOTA_UPDATE_IMAGE_INVALID: return "ota_image_invalid";
     default: return NULL;
     }
 }
@@ -461,5 +463,47 @@ eota_result_t eota_sha256_running(const eota_policy_t *policy, uint32_t size_byt
     if (!expected_slot(running, policy)) return EOTA_UPDATE_SLOT_UNAVAILABLE;
     if (size_bytes > running->size) return EOTA_UPDATE_TOO_LARGE;
     return hash_partition(running, size_bytes, digest, NULL);
+#endif
+}
+
+eota_result_t eota_sha256_verified_image(const eota_policy_t *policy, uint8_t subtype,
+                                         uint32_t *image_size_bytes,
+                                         uint8_t digest[EOTA_SHA256_BYTES])
+{
+    if (image_size_bytes != NULL) *image_size_bytes = 0;
+    if (digest != NULL) memset(digest, 0, EOTA_SHA256_BYTES);
+    if (image_size_bytes == NULL || digest == NULL) return EOTA_UPDATE_INVALID_REQUEST;
+#if !EOTA_SIGNED_ENABLED
+    (void)policy; (void)subtype;
+    return EOTA_UPDATE_UNSUPPORTED;
+#else
+    if (!valid_policy(policy) ||
+        (subtype != ESP_PARTITION_SUBTYPE_APP_OTA_0 &&
+         subtype != ESP_PARTITION_SUBTYPE_APP_OTA_1)) return EOTA_UPDATE_INVALID_REQUEST;
+    const esp_partition_t *partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_APP, subtype, NULL);
+    if (!expected_slot(partition, policy) || partition->subtype != subtype) {
+        return EOTA_UPDATE_SLOT_UNAVAILABLE;
+    }
+    const esp_partition_pos_t position = {
+        .offset = partition->address,
+        .size = partition->size,
+    };
+    esp_image_metadata_t metadata = {0};
+    const esp_err_t verified = esp_image_verify(ESP_IMAGE_VERIFY, &position, &metadata);
+    if (verified != ESP_OK) {
+        return verified == ESP_ERR_NO_MEM || verified == ESP_ERR_IMAGE_FLASH_FAIL ?
+               EOTA_UPDATE_RESOURCE_FAILURE : EOTA_UPDATE_IMAGE_INVALID;
+    }
+    if (metadata.image_len < EOTA_PREFIX_BYTES || metadata.image_len > partition->size) {
+        return EOTA_UPDATE_IMAGE_INVALID;
+    }
+    uint8_t calculated[EOTA_SHA256_BYTES];
+    const eota_result_t result = hash_partition(partition, metadata.image_len,
+                                                 calculated, NULL);
+    if (result != EOTA_UPDATE_OK) return result;
+    memcpy(digest, calculated, sizeof calculated);
+    *image_size_bytes = metadata.image_len;
+    return EOTA_UPDATE_OK;
 #endif
 }

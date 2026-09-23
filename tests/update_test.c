@@ -2,6 +2,7 @@
 #include "esp_app_format.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
+#include "esp_image_format.h"
 #include "http_transport.h"
 #include "esp_timer.h"
 #include "esp_ota_ops.h"
@@ -41,6 +42,10 @@ static esp_err_t target_lookup;
 static bool stall_headers, stall_first_byte, stall_midbody, early_fin, fin_midbody, select_then_fail;
 static bool select_then_fail_without_switch;
 static bool slow_drip_headers, slow_drip_body;
+static bool missing_image_partition;
+static esp_err_t image_verify_result;
+static uint32_t verified_image_size_bytes;
+static int image_verify_calls;
 static int status_code, init_calls, open_calls, header_calls, read_calls, cleanup_calls;
 static int transport_create_calls, transport_destroy_calls;
 static int begin_calls, write_calls, end_calls, abort_calls, select_calls, restore_calls, mark_calls, invalidate_calls, partition_reads;
@@ -75,6 +80,10 @@ static void reset(void)
     stall_headers = stall_first_byte = stall_midbody = early_fin = fin_midbody = select_then_fail = false;
     select_then_fail_without_switch = false;
     slow_drip_headers = slow_drip_body = false;
+    missing_image_partition = false;
+    image_verify_result = ESP_OK;
+    verified_image_size_bytes = IMAGE_BYTES;
+    image_verify_calls = 0;
     status_code = 200;
     content_length = IMAGE_BYTES;
     end_result = ESP_OK;
@@ -109,6 +118,27 @@ const esp_partition_t *esp_ota_get_running_partition(void) { return &old_slot; }
 const esp_partition_t *esp_ota_get_boot_partition(void) { return boot; }
 const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *partition)
 { assert(partition == NULL); return selected_slot; }
+const esp_partition_t *esp_partition_find_first(int type, int subtype, const char *label)
+{
+    assert(type == ESP_PARTITION_TYPE_APP && label == NULL);
+    if (missing_image_partition) return NULL;
+    if (subtype == ESP_PARTITION_SUBTYPE_APP_OTA_0) return &old_slot;
+    if (subtype == ESP_PARTITION_SUBTYPE_APP_OTA_1) return selected_slot;
+    assert(false);
+    return NULL;
+}
+esp_err_t esp_image_verify(esp_image_load_mode_t mode,
+                           const esp_partition_pos_t *part,
+                           esp_image_metadata_t *metadata)
+{
+    assert(mode == ESP_IMAGE_VERIFY && part != NULL && metadata != NULL);
+    assert((part->offset == old_slot.address && part->size == old_slot.size) ||
+           (part->offset == new_slot.address && part->size == new_slot.size));
+    ++image_verify_calls;
+    if (image_verify_result != ESP_OK) return image_verify_result;
+    metadata->image_len = verified_image_size_bytes;
+    return ESP_OK;
+}
 esp_err_t esp_ota_get_state_partition(const esp_partition_t *partition, esp_ota_img_states_t *state)
 {
     assert(partition == &old_slot || partition == &new_slot);
@@ -346,6 +376,55 @@ int main(void)
     assert(eota_sha256_running(&policy, IMAGE_BYTES, running_digest) == EOTA_UPDATE_OK &&
            memcmp(running_digest, request.sha256, sizeof running_digest) == 0);
     assert(eota_sha256_running(&policy, old_slot.size + 1, running_digest) == EOTA_UPDATE_TOO_LARGE);
+    reset(); digest(&request);
+    uint32_t verified_size = UINT32_MAX;
+    memset(running_digest, 0xa5, sizeof running_digest);
+    assert(eota_sha256_verified_image(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_0,
+                                      &verified_size, running_digest) == EOTA_UPDATE_OK &&
+           verified_size == IMAGE_BYTES &&
+           memcmp(running_digest, request.sha256, sizeof running_digest) == 0 &&
+           image_verify_calls == 1 && partition_reads == 2);
+    reset(); digest(&request);
+    image_bytes[IMAGE_BYTES - 1] ^= 1;
+    assert(eota_sha256_verified_image(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_0,
+                                      &verified_size, running_digest) == EOTA_UPDATE_OK &&
+           memcmp(running_digest, request.sha256, sizeof running_digest) != 0);
+    reset(); digest(&request);
+    memcpy(staged_bytes, image_bytes, IMAGE_BYTES);
+    staged_size = IMAGE_BYTES;
+    assert(eota_sha256_verified_image(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_1,
+                                      &verified_size, running_digest) == EOTA_UPDATE_OK &&
+           verified_size == IMAGE_BYTES &&
+           memcmp(running_digest, request.sha256, sizeof running_digest) == 0);
+    reset(); image_verify_result = ESP_ERR_IMAGE_INVALID;
+    assert(eota_sha256_verified_image(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_0,
+                                      &verified_size, running_digest) == EOTA_UPDATE_IMAGE_INVALID &&
+           verified_size == 0 && running_digest[0] == 0 && partition_reads == 0);
+    assert(strcmp(eota_error(EOTA_UPDATE_IMAGE_INVALID), "ota_image_invalid") == 0);
+    reset(); image_verify_result = ESP_ERR_IMAGE_FLASH_FAIL;
+    assert(eota_sha256_verified_image(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_0,
+                                      &verified_size, running_digest) == EOTA_UPDATE_RESOURCE_FAILURE &&
+           verified_size == 0 && running_digest[0] == 0 && partition_reads == 0);
+    reset(); verified_image_size_bytes = old_slot.size + 1;
+    assert(eota_sha256_verified_image(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_0,
+                                      &verified_size, running_digest) == EOTA_UPDATE_IMAGE_INVALID &&
+           partition_reads == 0);
+    reset(); fail_read = true;
+    assert(eota_sha256_verified_image(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_0,
+                                      &verified_size, running_digest) == EOTA_UPDATE_RESOURCE_FAILURE &&
+           verified_size == 0 && running_digest[0] == 0 && partition_reads == 1);
+    reset(); missing_image_partition = true;
+    assert(eota_sha256_verified_image(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_0,
+                                      &verified_size, running_digest) == EOTA_UPDATE_SLOT_UNAVAILABLE &&
+           image_verify_calls == 0);
+    reset(); selected_slot = &wrong_slot;
+    assert(eota_sha256_verified_image(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_1,
+                                      &verified_size, running_digest) == EOTA_UPDATE_SLOT_UNAVAILABLE &&
+           image_verify_calls == 0);
+    reset();
+    assert(eota_sha256_verified_image(&policy, 0xff, &verified_size,
+                                      running_digest) == EOTA_UPDATE_INVALID_REQUEST &&
+           verified_size == 0 && running_digest[0] == 0 && image_verify_calls == 0);
     reset(); valid_old = false;
     assert(run_update(&request) == EOTA_UPDATE_SLOT_UNAVAILABLE && init_calls == 0);
     reset(); target_lookup = ESP_OK; target_state = ESP_OTA_IMG_NEW;

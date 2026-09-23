@@ -83,6 +83,7 @@ typedef enum {
     EOTA_UPDATE_SIGNATURE_INVALID,
     EOTA_UPDATE_BOOT_STATE_UNKNOWN,
     EOTA_UPDATE_RESOURCE_FAILURE,
+    EOTA_UPDATE_IMAGE_INVALID,
 } eota_result_t;
 
 typedef void (*eota_progress_t)(uint32_t received_bytes, uint32_t total_bytes, void *context);
@@ -113,6 +114,14 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
 /* Hash exactly size_bytes of the current running app, including its signature. */
 eota_result_t eota_sha256_running(const eota_policy_t *policy, uint32_t size_bytes,
                                   uint8_t digest[EOTA_SHA256_BYTES]);
+/* Verify one exact OTA app image with the SDK (including its signature), then
+ * hash all signed image bytes reported by the SDK. This reports image identity,
+ * not otadata/boot-selector eligibility or product authorization. The caller
+ * must serialize every app/otadata writer until it has used this observation.
+ * On failure size and digest are cleared. */
+eota_result_t eota_sha256_verified_image(const eota_policy_t *policy, uint8_t subtype,
+                                         uint32_t *image_size_bytes,
+                                         uint8_t digest[EOTA_SHA256_BYTES]);
 const char *eota_error(eota_result_t result);
 
 esp_err_t eota_inspect(eota_current_t *current);

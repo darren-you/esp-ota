@@ -8,6 +8,7 @@
 flowchart LR
     app["调用方 Base 或独立 C3 样例：授权、收据、自检"] --> api["components/esp_ota/include/eota.h：机制接口"]
     api --> preflight["preflight：运行槽、目标槽与产品约束"]
+    api --> identity["verified image：验签与完整镜像摘要"]
     api --> prepare["prepare：HTTPS、镜像头、写槽、整镜像摘要与签名"]
     api --> select["select：重新读回摘要、签名和 boot selector"]
     api --> confirm["inspect / confirm / reject：pending 槽确认或回滚"]
@@ -15,6 +16,7 @@ flowchart LR
     prepare --> deadline
     transport --> deadline["http_deadline：全传输期单调时钟与绝对期限"]
     transport --> sdk["ESP-IDF v6.1：HTTP、mBed TLS、app_update、PSA、Flash"]
+    identity --> sdk
     select --> sdk
     confirm --> sdk
     lock["sdk-lock.json：IDF 与 esp-lwip 精确源码"] --> sdk

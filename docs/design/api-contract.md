@@ -7,6 +7,8 @@
 3. 应用持久提交与业务包的兼容绑定，再调用 `eota_select`。它重新核对运行/目标槽、目标整镜像摘要，并调用 SDK 的 `esp_ota_set_boot_partition` 再验签。选择读回与可回退事实不成立时尝试恢复旧槽；SDK 恢复选择会把旧槽标成 NEW，所以还要将实际运行槽恢复为 VALID，清除未启动候选的 NEW 记录，并读回安全预检条件。任一步读回不明明确返回 `EOTA_UPDATE_BOOT_STATE_UNKNOWN`，应用不得自动重启。
 4. 应用决定重启。新启动的本地自检及稳定窗口通过后才调用 `eota_confirm_pending`；已确认的 VALID 状态可幂等返回，UNTRACKED 不代表确认成功。明确失败时调用 `eota_reject_pending`，该 SDK 调用可能直接重启。`eota_inspect` 和 `eota_sha256_running` 让应用把持久收据与当前实际运行镜像关联，最终业务结果由应用裁决。
 
+`eota_sha256_verified_image` 是只读镜像身份接口：只接受 policy 精确声明的 `ota_0`／`ota_1` 物理分区，先经固定 SDK 的 `esp_image_verify(ESP_IMAGE_VERIFY)` 验证完整镜像及签名，再按返回的 `image_len` 对包括签名块的整份 signed bin 计算 SHA-256。它不从 `esp_partition_get_sha256` 取应用附加摘要，因为该值不覆盖签名块；也不把“镜像验签通过”等同于 otadata 允许启动、选中运行、可回退、属于当前产品或通过业务自检。失败时有效输出清零。Base 如需生成 Container 的固件集合，必须在同一串行所有权下读取真实 boot selector、两个 OTA 状态和已验签镜像；`NEW` 只是未启动候选，`PENDING_VERIFY` 下次启动会被 bootloader 标成 `ABORTED`，两者均不能仅凭分区存在就宣称已确认可启动。当前 Base 没有独立包分区与联合 OTA 状态机，不能将此接口的返回值直接填入 `econtainer_slot_firmware_set_t`。
+
 调用方在同步操作期间持有 URL、policy、进度上下文与唯一 worker，不并发释放或重复写槽。进度回调只在 `eota_prepare` 调用栈内使用，不能重入 `eota_` 或阻塞业务。产品操作 ID、同 ID 去重、NVS 命名空间、配置事务、USB/MQTT/FRP 协议、Container 包槽均不进入本库。
 
 IDF v6.1 的 HTTP header、发送与响应体方法都可能在单次调用内多次使用底层传输，不能只给每次调用设置相同的 socket 超时。本仓只保留一个网络路径：官方 `esp_http_client` 负责 HTTP 状态与解析，自有 custom transport 先通过 lwIP 核心线程的异步 DNS API 解析，再以非阻塞 socket 连接，并用 mBed TLS 公共 API 执行 TLS。`CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y` 是签名 OTA 必需配置。TLS 强制 `VERIFY_REQUIRED`、CA bundle 与原 URL 主机名的 SNI/证书名验证；HTTP 客户端保留原 URL 和 Host。

@@ -10,3 +10,4 @@ typedef struct {
     uint32_t address, size;
 } esp_partition_t;
 esp_err_t esp_partition_read(const esp_partition_t *partition, size_t offset, void *data, size_t size);
+const esp_partition_t *esp_partition_find_first(int type, int subtype, const char *label);

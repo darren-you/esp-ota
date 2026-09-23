@@ -69,3 +69,11 @@ AppleClang ASan/UBSan host CTest 5/5 通过，包括可控时钟对迟到字节�
 AppleClang ASan/UBSan 与固定 SDK mbedTLS 4.1 主机 CTest 5/5 通过。固定公开 ESP-IDF fork `855937cf9dcee13ee9c423fb0319238cdc8d53fd` 与 lwIP `2758df4cd3666b3b2a5b53830148379326425c0d` 的普通 C3 样例构建通过；仓外临时 RSA-3072 测试键与无效网络占位输入构建的签名 C3 镜像为 `0x111000` 字节、SHA-256 `2a1a09e45e750c3e868e934df8d7d77a750e898140c8d45f7101f6fc2232053d`，本机 RSA 验签通过，ELF 包含 `eota_prepare`、custom transport 与 `esp_ota_begin`。没有执行镜像或写设备。
 
 这次修改只阻止预检耗时被排除在期限统计外。固定 SDK 的 otadata/Flash 读写与擦除、镜像校验、HTTP/TLS 单步及 lwIP `socket/close` 仍是同步且不可由组件抢占的调用；进入其中任一步后，期限只能在返回时检查，不能强制 `eota_prepare` 在 5 分钟内返回。P5-04 继续未验收。
+
+## P6-10 固件镜像身份只读切片（2026-09-24）
+
+`eota_sha256_verified_image` 只对受控 policy 中精确地址、大小和类型的 OTA app 分区操作。固定 IDF `855937cf9dcee13ee9c423fb0319238cdc8d53fd` 的 `esp_image_verify(ESP_IMAGE_VERIFY)` 在签名更新配置中核对镜像格式、芯片与 RSA 签名，并把含签名块的完整镜像长度写入 `metadata.image_len`；库再按这一长度从真实分区流式计算 SHA-256。`esp_partition_get_sha256` 对 app 返回的是镜像内容附加摘要，不覆盖签名块，不能代替本接口。失败输出清零，不根据分区存在、boot selector 或 `NEW` 状态宣称可启动。
+
+AppleClang ASan/UBSan host CTest 4/4 通过，假件覆盖完整 signed bin 末尾字节、坏镜像、Flash 失败、错误分区几何和失败输出清零。固定 SDK 普通 C3 样例构建通过，镜像 `0x28730` 字节；仓外临时 RSA-3072 测试键的签名 C3 样例构建通过，镜像 `0x31000` 字节，SHA-256 `8ae3a2828272853ac31eaf9f53bf0670e63fe11523e9615673ddd1f040d28167`，本机 `espsecure verify-signature --version 2 --keyfile` 验签通过。未刷设备、改分区或用生产凭据。
+
+本切片只给出**已验签镜像字节身份**。固定 bootloader 在下一次启动会把 `PENDING_VERIFY` 标成 `ABORTED`，而 `NEW` 是尚未经历启动/自检的候选；`esp_ota_get_boot_partition` 自身也不保证镜像有效。Base/Container 尚缺在同一串行所有权下对真实 otadata、boot selector、回退资格及业务包绑定的联合状态转换；当前 Base 也没有独立包分区。因此不能把镜像摘要直接作为 `econtainer_slot_firmware_set_t` 的已证实可启动集合，P6-10/P7-04 仍未验收。
