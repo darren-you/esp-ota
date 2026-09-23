@@ -309,6 +309,12 @@ static int transport_read(esp_transport_handle_t handle, char *buffer, int lengt
     if (!begin_operation(transport, timeout_ms)) return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
     int result = ERR_TCP_TRANSPORT_CONNECTION_FAILED;
     while (remaining_us(transport, false) > 0) {
+        /* TLS 1.3 may return repeated post-handshake tickets without WANT_READ.
+         * They cannot extend this HTTP client's single read deadline. */
+        if (operation_remaining_us(transport) <= 0) {
+            result = ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT;
+            break;
+        }
         const int received = mbedtls_ssl_read(&transport->ssl, (unsigned char *)buffer,
                                                (size_t)length);
         if (remaining_us(transport, false) <= 0) break;

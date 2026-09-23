@@ -83,3 +83,13 @@ AppleClang ASan/UBSan host CTest 4/4 通过，假件覆盖完整 signed bin 末�
 审计发现 `eota_select` 原来只重验槽几何、完整镜像 SHA-256 与 SDK 签名；同一份已准备的合法签名镜像若在两阶段之间改用另一项目名或芯片 ID 的可信 policy，仍会进入 boot selector。新增故障回归先在旧实现复现选槽，随后将准备阶段的镜像头核对抽为共用函数：选槽前从目标 Flash 读回头与应用描述，按本次 policy 重验项目、芯片、magic 与 SDK 有效性，失败时不写 otadata。短于镜像头的准备记录直接拒绝。
 
 AppleClang ASan/UBSan host CTest 4/4 通过。锁定公开 ESP-IDF fork `855937cf9dcee13ee9c423fb0319238cdc8d53fd` 与 esp-lwIP `2758df4cd3666b3b2a5b53830148379326425c0d` 的普通 C3 样例编译通过；仓外临时 RSA-3072 测试键签名 C3 样例编译并验签通过，镜像 `0x31000` 字节、SHA-256 `901b3fad3c924f42fe70421656ccca6d0d769ff420814db10996e09e342b3c1e`。以上没有设备写入或真实切槽；P5-04 的实板 HTTPS、Flash 与回滚验收仍未完成。
+
+## P5-04 TLS 1.3 会话票据的单次读取期限（2026-09-24）
+
+固定 SDK 的 mbedTLS 4.1 可让 `mbedtls_ssl_read` 返回 `MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET`，表示收到非致命的 TLS 1.3 握手后会话票据，尚无应用数据。传输层原先直接重试这个返回值，仅在 `WANT_READ/WANT_WRITE` 分支检查单次读取期限。连续票据因而能让一次 `esp_http_client_read` 的传输调用持续到总期限，而非在本次 `read_timeout_ms` 到达时返回可重试 timeout。
+
+新增本地 socket 与 TLS 假件回归，在握手后每 5 毫秒返回一张会话票据，单次读取期限为 25 毫秒、总期限为 800 毫秒。旧源码的 `http_transport` 测试先在预期 timeout 断言失败（退出码 134）；现于每次 TLS read 前检查同一绝对期限，约 25 毫秒返回 timeout，随后同一连接还能读取服务端应用字节。AppleClang ASan/UBSan host CTest 4/4 通过；加入固定 SDK mbedTLS 4.1 的真实 HTTPS 回环后 CTest 5/5 通过。真实 TLS 1.3 回环仍只证明普通会话票据与响应；连续票据的期限故障由直接编译生产 transport 的假件覆盖。
+
+锁定公开 ESP-IDF fork `855937cf9dcee13ee9c423fb0319238cdc8d53fd` 与 esp-lwIP `2758df4cd3666b3b2a5b53830148379326425c0d` 的普通 ESP32-C3 样例构建通过，镜像 `0x287d0` 字节、SHA-256 `220825e0d07ae870fc38d6a8ba38d97f5ce7e51ac621815f4bf106151977004e`。仓外临时 RSA-3072 测试键与无效网络占位输入的签名 C3 构建通过，镜像 `0x111000` 字节、SHA-256 `a1ac24d0e9fc21bfc5ba043277ea916e4eb25c9b2c2e30f9c9677599ddc7faaa`；本机 RSA 验签成功，ELF map 包含 `eota_prepare`、`transport_read` 与官方 `esp_http_client_read`。构建未执行镜像、写设备或使用生产凭据。
+
+这项修正约束的是 TLS 每次返回后的再次调用。固定 SDK 单次密码学调用、HTTP 解析、Flash 和 `close` 仍不可抢占，且真实设备 HTTPS/Flash/bootloader 链路未测；P5-04 保持未验收。
