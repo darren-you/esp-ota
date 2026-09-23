@@ -296,6 +296,8 @@ static int transport_read(esp_transport_handle_t handle, char *buffer, int lengt
                                                (size_t)length);
         if (remaining_us(transport, false) <= 0) return -1;
         if (received >= 0) return received;
+        /* TLS 1.3 may deliver a post-handshake ticket before application data. */
+        if (received == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) continue;
         if (received != MBEDTLS_ERR_SSL_WANT_READ &&
             received != MBEDTLS_ERR_SSL_WANT_WRITE) return -1;
         if (received == MBEDTLS_ERR_SSL_WANT_READ &&

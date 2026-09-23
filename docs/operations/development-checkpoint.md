@@ -18,4 +18,10 @@
 | AppleClang ASan/UBSan host CTest | 4/4 通过 | `http_transport.c` 与 `http_deadline.c` 真实源码配本地 socket 和 DNS/TLS 假件；覆盖 DNS 超时后的迟到回调及排队取消、TCP 拒绝、TLS 握手超时、请求写入和响应读取慢滴流、CA/主机名/校验调用、坏证书标志、未执行定时回调前已跨空闲期限及文件描述符复用 |
 | 固定 IDF C3 临时 RSA 测试键签名构建 | `0x31000` 字节；SHA-256 `778d2ed2bd8d08ce3bc51876b47f278842c7d2d4a6c07056f6f243261375d0a9`；`espsecure verify-signature --version 2 --keyfile` 报 RSA 签名有效 | `CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y`；实际 `eota_prepare` 与 `http_transport` 编入；没有刷板或改生产密钥 |
 
-公开 API 无法安全接管 ESP-TLS 内部已连接 socket：绕过其 `INIT` 状态会漏掉私有 `is_tls` 初始化。官方 SSL transport 即使用数值 IP，`getaddrinfo` 仍通过无期限的 lwIP 核心线程信号量等待。新路径不使用这些入口，但 mBed TLS 单步密码学、缓存记录和 HTTP 解析不能由 OTA 库抢占；host 假 TLS 不能证明真实 CA、SNI 或证书链行为。P5-04 仍待真实 HTTPS 与实板长滴流证据，实板升级、回滚、恢复和 Base 硬切亦未验收。
+公开 API 无法安全接管 ESP-TLS 内部已连接 socket：绕过其 `INIT` 状态会漏掉私有 `is_tls` 初始化。官方 SSL transport 即使用数值 IP，`getaddrinfo` 仍通过无期限的 lwIP 核心线程信号量等待。新路径不使用这些入口，但 mBed TLS 单步密码学、缓存记录和 HTTP 解析不能由 OTA 库抢占；此检查点的 host 假 TLS 尚不能证明真实 CA、SNI 或证书链行为。后续真实 TLS host 回环见下节；实板升级、回滚、恢复和 Base 硬切仍未验收。
+
+## P5-04 真实 TLS host 回环补证（2026-09-23）
+
+固定 IDF `fff9895c82d744c7237be8847347bdd1b07c6643` 的 mbedTLS 4.1 原生构建，链接同一份 `http_transport.c`。AppleClang ASan/UBSan CTest 5/5 通过，其中真实 HTTPS 回环含六个场景：TLS 1.2 下正确 CA 与 `localhost` SNI/证书名可读完整响应；错误 CA、`wrong.local` 主机名被拒；握手停顿在约 250 毫秒连接截止；响应每 60 毫秒 1 字节，在约 450 毫秒总期限失败。TLS 1.3 成功场景发现 `mbedtls_ssl_read` 会先返回非致命 `MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET`；传输现继续读取应用数据。测试 CA 在 host 的 `esp_crt_bundle_attach` 适配函数中注入，证书链、主机名及 TLS 记录由真实 mbedTLS 验证。原生库使用 host 默认配置，当前 C3 样例仅启用 TLS 1.2；未执行设备侧 ESP 证书 bundle、真实 DNS/lwIP、`esp_http_client` 解析或升级写槽。
+
+固定 IDF C3 样例以仓外临时 RSA-3072 测试键重新签名构建：镜像 `0x31000` 字节，SHA-256 `4c52fc53ce83c669b49e528aa5d3c8ab0b51da91b51a604987c2b595aaf28de4`；`espsecure verify-signature --version 2 --keyfile` 核验 RSA 签名有效。没有刷板、改分区、eFuse 或生产密钥。P5-04 仍缺设备上的完整 HTTPS、HTTP 解析、Flash 与 bootloader 路径及实板长滴流证据，因此保持未验收。

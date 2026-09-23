@@ -17,7 +17,7 @@ flowchart LR
     select --> sdk
     confirm --> sdk
     lock["sdk-lock.json：IDF 与 esp-lwip 精确源码"] --> sdk
-    host["tests：真实组件源码 + SDK 假件"] --> prepare
+    host["tests：组件源码 + SDK 假件/原生 mbedTLS"] --> prepare
     host --> select
     host --> confirm
     sample["examples/c3：无私有依赖的实验固件"] --> api
@@ -35,6 +35,16 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+有锁定 SDK 后，可另跑真实 mbedTLS HTTPS 回环：
+
+```bash
+cmake -S . -B build-real-https -DBUILD_TESTING=ON -DEOTA_REAL_HTTPS_TEST=ON
+cmake --build build-real-https
+ctest --test-dir build-real-https --output-on-failure
+```
+
+此入口读取 `IDF_PATH`、核对 `sdk-lock.json`，并使用本机 Python 与 OpenSSL 生成临时测试 CA；不会连接外网或设备。
+
 IDF 组件位于 `components/esp_ota`，`idf_component.yml` 固定 ESP-IDF 6.1.0；[SDK 锁](components/esp_ota/sdk-lock.json)还固定 IDF 完整提交和公开 `esp-lwip` 提交。构建守卫核对两份源码和 lwIP 以外的干净状态，防止用另一套 SDK 误报组合结果。签名 OTA 消费者还须启用 `CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y`；样例默认配置已启用。已备好锁定 SDK 后：
 
 ```bash
@@ -46,9 +56,9 @@ idf.py -C examples/c3 build
 
 ## 当前验证边界
 
-- host ASan/UBSan 测试覆盖槽预检、准备与切槽分离、镜像头/长度/摘要/签名、HTTP 中断、SDK 错误、恢复读回及 pending 确认；真实 transport 源码配本地 socket 与 TLS/DNS 假件核对超时、迟到回调、慢滴流及清理顺序。具体见[测试说明](tests/README.md)。
+- host ASan/UBSan 测试覆盖槽预检、准备与切槽分离、镜像头/长度/摘要/签名、HTTP 中断、SDK 错误、恢复读回及 pending 确认；真实 transport 源码配本地 socket 与 TLS/DNS 假件核对超时、迟到回调、慢滴流及清理顺序。另有固定 SDK 源码构建的真实 mbedTLS HTTPS 回环，验证 CA、SNI/证书名、握手期限及响应慢滴流；测试 CA 通过 host 适配入口注入，未调用设备侧证书 bundle。具体见[测试说明](tests/README.md)。
 - ESP32-C3 普通构建与使用临时 RSA-3072 测试键的签名构建，只证明组件和样例在固定 SDK 下可编译，不含设备写入。
-- 传输从 DNS 前启动一次性定时器；异步 DNS、非阻塞 TCP、mBed TLS 握手、请求发送、响应头和响应体共用绝对总期限与无进展期限，TCP/TLS 建连另受连接期限约束。到期先标记失效并 `shutdown` 已创建的 socket；调用栈退出后等待定时回调结束，再由传输所有者关闭 socket。TLS 使用默认 CA bundle、强制证书验证及 URL 原主机名的 SNI/证书名校验。密码学单步和 HTTP 解析不是可抢占的实时任务，软件只能在网络 I/O 与调用返回边界执行截止检查。当前 host 故障测试与 C3 编译不能代替真实 HTTPS/实板证据；P5-04 与实板升级、回滚、Base 接入仍未验收。
+- 传输从 DNS 前启动一次性定时器；异步 DNS、非阻塞 TCP、mBed TLS 握手、请求发送、响应头和响应体共用绝对总期限与无进展期限，TCP/TLS 建连另受连接期限约束。到期先标记失效并 `shutdown` 已创建的 socket；调用栈退出后等待定时回调结束，再由传输所有者关闭 socket。设备侧 TLS 使用默认 CA bundle、强制证书验证及 URL 原主机名的 SNI/证书名校验。密码学单步和 HTTP 解析不是可抢占的实时任务，软件只能在网络 I/O 与调用返回边界执行截止检查。真实 HTTPS host 回环与 C3 编译仍不能代替设备上的完整 HTTP/Flash/bootloader 证据；P5-04 与实板升级、回滚、Base 接入仍未验收。
 
 源码与测试从 Base 已提交源码迁入的来源和改造边界见[来源记录](docs/design/source-provenance.md)。工作区完整阶段与验收条件以[五仓主计划](https://github.com/darren-you/darren-space/blob/master/harness/docs/design/darren-space/global/esp-base-frp-mqtt-ota-container-development-plan.md)为准。
 本轮编译与 host 测试的精确结果见[开发检查点](docs/operations/development-checkpoint.md)。
