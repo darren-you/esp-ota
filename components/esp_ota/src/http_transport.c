@@ -35,6 +35,7 @@ typedef struct {
 typedef struct {
     eota_http_deadline_t *deadline;
     int64_t connect_started_us;
+    int64_t operation_deadline_us;
     uint32_t connect_timeout_ms;
     int socket_fd;
     bool tls_initialized;
@@ -104,6 +105,25 @@ static bool note_progress(eota_http_transport_t *transport)
     return eota_http_deadline_progress(transport->deadline);
 }
 
+/* A TLS record may arrive one ciphertext byte at a time. Bound the entire
+ * transport call, not each select within mbedtls_ssl_read/write. */
+static bool begin_operation(eota_http_transport_t *transport, int timeout_ms)
+{
+    transport->operation_deadline_us = -1;
+    if (timeout_ms < 0) return true;
+    const int64_t now = esp_timer_get_time();
+    const int64_t duration_us = (int64_t)timeout_ms * 1000;
+    if (now < 0 || now > INT64_MAX - duration_us) return false;
+    transport->operation_deadline_us = now + duration_us;
+    return true;
+}
+
+static int64_t operation_remaining_us(const eota_http_transport_t *transport)
+{
+    return transport->operation_deadline_us < 0 ? INT64_MAX :
+           transport->operation_deadline_us - esp_timer_get_time();
+}
+
 static bool resolve_host(eota_http_transport_t *transport, const char *hostname,
                          ip_addr_t *address)
 {
@@ -153,6 +173,9 @@ static int wait_socket(eota_http_transport_t *transport, bool write_ready,
     const int64_t left_us = remaining_us(transport, connecting);
     if (left_us <= 0 || transport->socket_fd < 0) return -1;
     int64_t wait_us = left_us;
+    const int64_t operation_us = operation_remaining_us(transport);
+    if (operation_us <= 0) return 0;
+    if (operation_us < wait_us) wait_us = operation_us;
     if (timeout_ms >= 0 && (int64_t)timeout_ms * 1000 < wait_us) {
         wait_us = (int64_t)timeout_ms * 1000;
     }
@@ -165,8 +188,9 @@ static int wait_socket(eota_http_transport_t *transport, bool write_ready,
     if (write_ready) FD_SET(transport->socket_fd, &write_set);
     else FD_SET(transport->socket_fd, &read_set);
     const int ready = select(transport->socket_fd + 1, &read_set, &write_set, NULL, &timeout);
-    return remaining_us(transport, connecting) > 0 && ready > 0 ? 1 :
-           ready == 0 ? 0 : -1;
+    if (remaining_us(transport, connecting) <= 0) return -1;
+    if (operation_remaining_us(transport) <= 0) return 0;
+    return ready > 0 ? 1 : ready == 0 ? 0 : -1;
 }
 
 static bool connect_socket(eota_http_transport_t *transport, const ip_addr_t *address, int port)
@@ -209,6 +233,7 @@ static int tls_send(void *argument, const unsigned char *buffer, size_t length)
     if (remaining_us(transport, transport->connect_started_us != 0) <= 0) {
         return MBEDTLS_ERR_NET_SEND_FAILED;
     }
+    if (operation_remaining_us(transport) <= 0) return MBEDTLS_ERR_SSL_WANT_WRITE;
     const ssize_t sent = send(transport->socket_fd, buffer, length, 0);
     if (sent > 0) return note_progress(transport) ? (int)sent : MBEDTLS_ERR_NET_SEND_FAILED;
     if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
@@ -223,6 +248,7 @@ static int tls_recv(void *argument, unsigned char *buffer, size_t length)
     if (remaining_us(transport, transport->connect_started_us != 0) <= 0) {
         return MBEDTLS_ERR_NET_RECV_FAILED;
     }
+    if (operation_remaining_us(transport) <= 0) return MBEDTLS_ERR_SSL_WANT_READ;
     const ssize_t received = recv(transport->socket_fd, buffer, length, 0);
     if (received > 0) return note_progress(transport) ? (int)received : MBEDTLS_ERR_NET_RECV_FAILED;
     if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
@@ -280,24 +306,33 @@ static int transport_read(esp_transport_handle_t handle, char *buffer, int lengt
         return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
     }
     if (length > 1024) length = 1024;
+    if (!begin_operation(transport, timeout_ms)) return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
+    int result = ERR_TCP_TRANSPORT_CONNECTION_FAILED;
     while (remaining_us(transport, false) > 0) {
         const int received = mbedtls_ssl_read(&transport->ssl, (unsigned char *)buffer,
                                                (size_t)length);
-        if (remaining_us(transport, false) <= 0) return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
-        if (received > 0) return received;
-        if (received == 0) return ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN;
+        if (remaining_us(transport, false) <= 0) break;
+        /* Preserve data already consumed by TLS, even if a single crypto
+         * step ended just after the per-call timeout. */
+        if (received > 0) { result = received; break; }
+        if (received == 0) { result = ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN; break; }
         /* TLS 1.3 may deliver a post-handshake ticket before application data. */
         if (received == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) continue;
         if (received != MBEDTLS_ERR_SSL_WANT_READ &&
-            received != MBEDTLS_ERR_SSL_WANT_WRITE) return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
+            received != MBEDTLS_ERR_SSL_WANT_WRITE) break;
+        if (operation_remaining_us(transport) <= 0) {
+            result = ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT;
+            break;
+        }
         if (received == MBEDTLS_ERR_SSL_WANT_READ &&
             mbedtls_ssl_get_bytes_avail(&transport->ssl) != 0) continue;
         const int ready = wait_socket(transport, received == MBEDTLS_ERR_SSL_WANT_WRITE,
                                       timeout_ms, false);
-        if (ready == 0) return ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT;
-        if (ready < 0) return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
+        if (ready == 0) { result = ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT; break; }
+        if (ready < 0) break;
     }
-    return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
+    transport->operation_deadline_us = -1;
+    return result;
 }
 
 static int transport_write(esp_transport_handle_t handle, const char *buffer, int length,
@@ -306,18 +341,22 @@ static int transport_write(esp_transport_handle_t handle, const char *buffer, in
     eota_http_transport_t *transport = esp_transport_get_context_data(handle);
     if (transport == NULL || buffer == NULL || length <= 0) return -1;
     if (length > 1024) length = 1024;
+    if (!begin_operation(transport, timeout_ms)) return -1;
+    int result = -1;
     while (remaining_us(transport, false) > 0) {
         /* WANT_* must retry this exact buffer and length. */
         const int sent = mbedtls_ssl_write(&transport->ssl, (const unsigned char *)buffer,
                                            (size_t)length);
-        if (remaining_us(transport, false) <= 0) return -1;
-        if (sent > 0) return sent;
+        if (remaining_us(transport, false) <= 0) break;
+        if (sent > 0) { result = sent; break; }
         if (sent != MBEDTLS_ERR_SSL_WANT_READ &&
-            sent != MBEDTLS_ERR_SSL_WANT_WRITE) return -1;
+            sent != MBEDTLS_ERR_SSL_WANT_WRITE) break;
+        if (operation_remaining_us(transport) <= 0) break;
         if (wait_socket(transport, sent == MBEDTLS_ERR_SSL_WANT_WRITE,
-                        timeout_ms, false) != 1) return -1;
+                        timeout_ms, false) != 1) break;
     }
-    return -1;
+    transport->operation_deadline_us = -1;
+    return result;
 }
 
 static int transport_poll_read(esp_transport_handle_t handle, int timeout_ms)
@@ -370,6 +409,7 @@ esp_transport_handle_t eota_http_transport_create(eota_http_deadline_t *deadline
     }
     transport->deadline = deadline;
     transport->connect_timeout_ms = connect_timeout_ms;
+    transport->operation_deadline_us = -1;
     transport->socket_fd = -1;
     if (esp_transport_set_context_data(handle, transport) != ESP_OK) {
         free(transport);

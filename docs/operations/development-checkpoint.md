@@ -47,3 +47,17 @@
 AppleClang ASan/UBSan host CTest 5/5 通过，包括可控时钟对迟到字节、持续慢滴流总期限和时钟异常的检查、DNS 迟到回调与排队取消、TCP/TLS/收发故障、SDK 内慢滴流、固定 SDK mbedTLS 4.1 的真实 HTTPS 回环。固定公开 SDK `855937cf9dcee13ee9c423fb0319238cdc8d53fd` 下普通 ESP32-C3 样例编译通过，镜像 `0x287d0` 字节，SHA-256 `6024a3b0e2bf1cadc4ad6334161dff243b502a97bd73be006714fcfc4e7aa398`；仓外临时 RSA-3072 测试键的签名样例镜像为 `0x31000` 字节，SHA-256 `1fda3da65d4212ecbc677e4e6a331af1a3adfaf431fbde1e97cd0b9180b3db7f`，本机 `espsecure verify-signature --version 2 --keyfile` 验证 RSA 签名有效。没有设备写入、eFuse 操作或生产密钥使用。
 
 这一收敛减少了共用 timer TASK 与清理等待的依赖，但不改变固定 SDK `close`/HTTP/TLS、Flash 与任务调度不可抢占的事实；仍不能给整个 `eota_prepare` 承诺严格的 30 秒无进展或 5 分钟墙钟返回上界。P5-04 保持未验收，实板与完整 HTTPS/Flash/bootloader 链路仍按上节条件验证。
+
+## P5-04 单次 TLS 读写与 Flash 阶段返回检查（2026-09-24）
+
+固定 SDK 的 `esp_http_client_fetch_headers/read` 能在一次方法调用内多次向传输层读取。此前 custom transport 对每次 `select` 都重新使用 SDK 传入的 `read_timeout_ms`：同一 TLS 记录每隔一小段时间收到密文字节时，单次 `mbedtls_ssl_read` 可持续超过这项单次期限。先用可续读的假 TLS 记录和 18 毫秒一字节的本地 socket 复现：65 毫秒读期限下，旧实现的首轮读取未返回 timeout，测试按预期失败。修正后从 transport 单次读写入口建立单调时钟绝对截止，TLS BIO 回调和 `select` 消费同一截止；到期返回可重试读取 timeout，下次调用保留 TLS 记录状态并可继续读完。全局总期限和无进展期限仍优先拒绝逾期字节，已解密但刚超过单次截止的数据不被丢弃。
+
+准备阶段在 `esp_ota_begin/write/end`、HTTP 清理和分区读回返回后检查同一下载期限；固定假件逐项把操作推进到 30 秒无进展期限，均拒绝产出 `prepared`，不执行 `select`。这只能限制 SDK 调用返回后继续推进的行为，不能中断正在运行的 Flash/签名/HTTP/TLS 单步，也不能保证 `esp_ota_abort` 或 `close` 的严格墙钟时长。
+
+| 验证 | 结果 | 边界 |
+| --- | --- | --- |
+| AppleClang ASan/UBSan + 固定 SDK mbedTLS 4.1 host CTest | 5/5 通过 | 包含慢 TLS 记录的单次读取期限、可续读、Flash 阶段逾期拒绝以及已有 CA、SNI、证书名和响应慢滴流回归 |
+| 固定公开 ESP-IDF fork 普通 C3 样例 | `0x28730` 字节，SHA-256 `410d6758f3039c40cb6ee18a0a8462601015dad7628071c64bf642879d5ef6de` | 默认未武装构建；不具备签名升级能力 |
+| 同一 SDK 临时 RSA-3072 测试键签名 C3 样例 | 使用仓外无效网络/镜像占位输入令实验分支参与链接；`0x111000` 字节，SHA-256 `788e5bf3c93cfeedda681f06dfef0487b218d51dc1e0e8281b4421ad4d050baf`，`espsecure verify-signature --version 2` 验签通过；ELF 确认 `eota_prepare`、custom transport 与 HTTP 读取均已链接 | 密钥与占位输入仅在仓外临时目录，未执行该镜像、刷板、改分区、eFuse 或使用生产凭据 |
+
+固定 lwIP `socket/close` 等待 TCP/IP 核心线程、mBed TLS 单步和 Flash SDK 调用仍不可抢占，故不把 30 秒或 5 分钟表述为整个 `eota_prepare` 的严格墙钟上界。P5-04 的受控实板 HTTPS、真实 DNS/lwIP、完整镜像下载/Flash/bootloader 与墙钟测量仍待执行；阶段未验收。

@@ -45,6 +45,8 @@ static int status_code, init_calls, open_calls, header_calls, read_calls, cleanu
 static int transport_create_calls, transport_destroy_calls;
 static int begin_calls, write_calls, end_calls, abort_calls, select_calls, restore_calls, mark_calls, invalidate_calls, partition_reads;
 static int64_t content_length, now_us, read_advance_us;
+static int64_t begin_advance_us, write_advance_us, flash_read_advance_us;
+static int64_t end_advance_us, cleanup_advance_us;
 static esp_err_t end_result;
 static size_t stream_offset, staged_size;
 static uint32_t last_progress;
@@ -80,6 +82,8 @@ static void reset(void)
     transport_create_calls = transport_destroy_calls = 0;
     begin_calls = write_calls = end_calls = abort_calls = select_calls = restore_calls = mark_calls = invalidate_calls = partition_reads = 0;
     now_us = read_advance_us = 0;
+    begin_advance_us = write_advance_us = flash_read_advance_us = 0;
+    end_advance_us = cleanup_advance_us = 0;
     stream_offset = staged_size = 0;
     last_progress = 0;
     memset(&fake_transport, 0, sizeof fake_transport);
@@ -123,6 +127,7 @@ esp_err_t esp_ota_begin(const esp_partition_t *partition, size_t size, esp_ota_h
 {
     assert(partition == &new_slot && size == IMAGE_BYTES && staged_size == 0);
     ++begin_calls;
+    advance_time(begin_advance_us);
     *handle = 1;
     return ESP_OK;
 }
@@ -132,10 +137,11 @@ esp_err_t esp_ota_write(esp_ota_handle_t handle, const void *data, size_t size)
     memcpy(staged_bytes + staged_size, data, size);
     staged_size += size;
     ++write_calls;
+    advance_time(write_advance_us);
     return ESP_OK;
 }
 esp_err_t esp_ota_end(esp_ota_handle_t handle)
-{ assert(handle == 1 && staged_size == IMAGE_BYTES); ++end_calls; return end_result; }
+{ assert(handle == 1 && staged_size == IMAGE_BYTES); ++end_calls; advance_time(end_advance_us); return end_result; }
 esp_err_t esp_ota_abort(esp_ota_handle_t handle)
 { assert(handle == 1); ++abort_calls; return ESP_OK; }
 esp_err_t esp_ota_set_boot_partition(const esp_partition_t *partition)
@@ -179,6 +185,7 @@ esp_err_t esp_partition_read(const esp_partition_t *partition, size_t offset, vo
 {
     assert(partition == &old_slot || partition == &new_slot);
     ++partition_reads;
+    advance_time(flash_read_advance_us);
     if (fail_read) return ESP_FAIL;
     if (partition == &old_slot) {
         assert(offset + size <= sizeof image_bytes);
@@ -270,7 +277,7 @@ int esp_http_client_read(esp_http_client_handle_t client, char *buffer, int len)
 bool esp_http_client_is_complete_data_received(esp_http_client_handle_t client)
 { assert(client); return complete && stream_offset == sizeof image_bytes; }
 esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client)
-{ assert(client && fake_transport.alive && cleanup_calls == 0); ++cleanup_calls; return ESP_OK; }
+{ assert(client && fake_transport.alive && cleanup_calls == 0); ++cleanup_calls; advance_time(cleanup_advance_us); return ESP_OK; }
 psa_status_t psa_hash_setup(psa_hash_operation_t *operation, int algorithm)
 { assert(algorithm == PSA_ALG_SHA_256); operation->sum = 0; return PSA_SUCCESS; }
 psa_status_t psa_crypto_init(void) { return PSA_SUCCESS; }
@@ -380,6 +387,21 @@ int main(void)
     assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && abort_calls == 1 && end_calls == 0);
     reset(); read_advance_us = INT64_C(25000000);
     assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && now_us >= INT64_C(300000000) && end_calls == 0);
+    reset(); begin_advance_us = INT64_C(30000000);
+    assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && begin_calls == 1 &&
+           write_calls == 0 && end_calls == 0 && abort_calls == 1 && select_calls == 0);
+    reset(); write_advance_us = INT64_C(30000000);
+    assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && begin_calls == 1 &&
+           write_calls == 1 && end_calls == 0 && abort_calls == 1 && select_calls == 0);
+    reset(); cleanup_advance_us = INT64_C(30000000);
+    assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && cleanup_calls == 1 &&
+           end_calls == 0 && abort_calls == 1 && select_calls == 0);
+    reset(); flash_read_advance_us = INT64_C(30000000);
+    assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && partition_reads == 1 &&
+           end_calls == 0 && abort_calls == 1 && select_calls == 0);
+    reset(); end_advance_us = INT64_C(30000000);
+    assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && end_calls == 1 &&
+           abort_calls == 0 && select_calls == 0);
     reset(); request.sha256[0] ^= 1;
     assert(run_update(&request) == EOTA_UPDATE_HASH_MISMATCH && abort_calls == 1 && end_calls == 0);
     request.sha256[0] ^= 1;

@@ -156,18 +156,27 @@ static bool valid_url(const char *url)
 }
 
 static eota_result_t hash_partition(const esp_partition_t *partition, uint32_t size,
-                                    uint8_t digest[EOTA_SHA256_BYTES])
+                                    uint8_t digest[EOTA_SHA256_BYTES],
+                                    const eota_http_deadline_t *deadline)
 {
     uint8_t buffer[1024];
     psa_hash_operation_t hash = PSA_HASH_OPERATION_INIT;
     if (psa_crypto_init() != PSA_SUCCESS ||
         psa_hash_setup(&hash, PSA_ALG_SHA_256) != PSA_SUCCESS) return EOTA_UPDATE_RESOURCE_FAILURE;
     for (uint32_t offset = 0; offset < size;) {
+        if (deadline != NULL && eota_http_deadline_remaining_us(deadline) <= 0) {
+            (void)psa_hash_abort(&hash);
+            return EOTA_UPDATE_DOWNLOAD_FAILED;
+        }
         const size_t chunk = size - offset < sizeof buffer ? size - offset : sizeof buffer;
         if (esp_partition_read(partition, offset, buffer, chunk) != ESP_OK ||
             psa_hash_update(&hash, buffer, chunk) != PSA_SUCCESS) {
             (void)psa_hash_abort(&hash);
             return EOTA_UPDATE_RESOURCE_FAILURE;
+        }
+        if (deadline != NULL && eota_http_deadline_remaining_us(deadline) <= 0) {
+            (void)psa_hash_abort(&hash);
+            return EOTA_UPDATE_DOWNLOAD_FAILED;
         }
         offset += (uint32_t)chunk;
     }
@@ -176,6 +185,9 @@ static eota_result_t hash_partition(const esp_partition_t *partition, uint32_t s
         actual_size != EOTA_SHA256_BYTES) {
         (void)psa_hash_abort(&hash);
         return EOTA_UPDATE_RESOURCE_FAILURE;
+    }
+    if (deadline != NULL && eota_http_deadline_remaining_us(deadline) <= 0) {
+        return EOTA_UPDATE_DOWNLOAD_FAILED;
     }
     return EOTA_UPDATE_OK;
 }
@@ -311,6 +323,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
             write_used += (size_t)count;
             if (write_used == sizeof write_buffer) {
                 if (esp_ota_write(handle, write_buffer, write_used) != ESP_OK) goto abort;
+                if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
                 write_used = 0;
             }
         }
@@ -332,6 +345,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
             }
             if (esp_ota_begin(target, image->image_size_bytes, &handle) != ESP_OK) goto abort;
             ota_started = true;
+            if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
             memcpy(write_buffer, prefix, sizeof prefix);
             write_used = sizeof prefix;
         }
@@ -343,9 +357,11 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     client = NULL;
     (void)esp_transport_destroy(transport);
     transport = NULL;
+    if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
     if (write_used > 0 && esp_ota_write(handle, write_buffer, write_used) != ESP_OK) goto abort;
+    if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
     uint8_t digest[EOTA_SHA256_BYTES];
-    result = hash_partition(target, image->image_size_bytes, digest);
+    result = hash_partition(target, image->image_size_bytes, digest, &deadline);
     if (result != EOTA_UPDATE_OK) goto abort;
     if (memcmp(digest, image->sha256, sizeof digest) != 0) {
         result = EOTA_UPDATE_HASH_MISMATCH;
@@ -357,6 +373,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
         return finish == ESP_ERR_OTA_VALIDATE_FAILED ? EOTA_UPDATE_SIGNATURE_INVALID :
                EOTA_UPDATE_DOWNLOAD_FAILED;
     }
+    if (eota_http_deadline_remaining_us(&deadline) <= 0) return EOTA_UPDATE_DOWNLOAD_FAILED;
     *prepared = (eota_prepared_t){.slots = slots, .image_size_bytes = image->image_size_bytes};
     memcpy(prepared->sha256, image->sha256, sizeof prepared->sha256);
     return EOTA_UPDATE_OK;
@@ -383,7 +400,7 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
     if (result != EOTA_UPDATE_OK) return result;
     if (!same_slots(&slots, &prepared->slots)) return EOTA_UPDATE_SLOT_UNAVAILABLE;
     uint8_t digest[EOTA_SHA256_BYTES];
-    result = hash_partition(target, prepared->image_size_bytes, digest);
+    result = hash_partition(target, prepared->image_size_bytes, digest, NULL);
     if (result != EOTA_UPDATE_OK) return result;
     if (memcmp(digest, prepared->sha256, sizeof digest) != 0) return EOTA_UPDATE_HASH_MISMATCH;
     const esp_err_t select = esp_ota_set_boot_partition(target);
@@ -442,6 +459,6 @@ eota_result_t eota_sha256_running(const eota_policy_t *policy, uint32_t size_byt
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (!expected_slot(running, policy)) return EOTA_UPDATE_SLOT_UNAVAILABLE;
     if (size_bytes > running->size) return EOTA_UPDATE_TOO_LARGE;
-    return hash_partition(running, size_bytes, digest);
+    return hash_partition(running, size_bytes, digest, NULL);
 #endif
 }
