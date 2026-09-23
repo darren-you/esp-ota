@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "eota.h"
+#include "http_deadline.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -271,6 +272,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     if (client == NULL) return EOTA_UPDATE_RESOURCE_FAILURE;
     esp_ota_handle_t handle = 0;
     bool ota_started = false;
+    eota_http_deadline_t deadline = {0};
     result = EOTA_UPDATE_DOWNLOAD_FAILED;
     const int64_t started_us = esp_timer_get_time();
     int64_t last_progress_us = started_us;
@@ -278,16 +280,29 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
         esp_http_client_open(client, 0) != ESP_OK ||
         !within_download_deadline(policy, started_us, last_progress_us)) goto abort;
     if (esp_http_client_set_timeout_ms(client, (int)policy->read_timeout_ms) != ESP_OK) goto abort;
+    /* IDF's header/body methods can loop internally while a peer trickles
+     * bytes. A separate one-shot timer shuts down their socket at the first
+     * idle or total deadline, including time spent inside one SDK call. */
+    if (!eota_http_deadline_init(&deadline, esp_http_client_get_socket(client))) {
+        result = EOTA_UPDATE_RESOURCE_FAILURE;
+        goto abort;
+    }
+    if (!eota_http_deadline_arm(&deadline, started_us, last_progress_us,
+                                policy->total_timeout_ms, policy->idle_timeout_ms)) goto abort;
     int64_t content_length;
     do {
         if (!within_download_deadline(policy, started_us, last_progress_us)) goto abort;
         content_length = esp_http_client_fetch_headers(client);
         if (!within_download_deadline(policy, started_us, last_progress_us)) goto abort;
     } while (content_length == -ESP_ERR_HTTP_EAGAIN);
+    if (!eota_http_deadline_stop(&deadline)) goto abort;
     if (content_length != image->image_size_bytes ||
         esp_http_client_get_status_code(client) != 200 ||
         esp_http_client_is_chunked_response(client) ||
         esp_http_client_get_content_length(client) != image->image_size_bytes) goto abort;
+    last_progress_us = esp_timer_get_time();
+    if (!eota_http_deadline_arm(&deadline, started_us, last_progress_us,
+                                policy->total_timeout_ms, policy->idle_timeout_ms)) goto abort;
 
     uint8_t buffer[EOTA_READ_BYTES];
     uint8_t prefix[EOTA_PREFIX_BYTES];
@@ -307,6 +322,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
         if (!within_download_deadline(policy, started_us, last_progress_us)) goto abort;
         if (count == -ESP_ERR_HTTP_EAGAIN) continue;
         if (count <= 0 || (size_t)count > wanted) goto abort;
+        if (!eota_http_deadline_stop(&deadline)) goto abort;
         if (received < sizeof prefix) {
             memcpy(prefix + received, buffer, (size_t)count);
         } else {
@@ -340,6 +356,9 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
             write_used = sizeof prefix;
         }
         if (progress != NULL) progress(received, image->image_size_bytes, context);
+        if (received < image->image_size_bytes &&
+            !eota_http_deadline_arm(&deadline, started_us, last_progress_us,
+                                    policy->total_timeout_ms, policy->idle_timeout_ms)) goto abort;
     }
     if (!esp_http_client_is_complete_data_received(client) ||
         (write_used > 0 && esp_ota_write(handle, write_buffer, write_used) != ESP_OK)) goto abort;
@@ -352,6 +371,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     }
     const esp_err_t finish = esp_ota_end(handle);
     ota_started = false;
+    eota_http_deadline_destroy(&deadline);
     (void)esp_http_client_cleanup(client);
     if (finish != ESP_OK) {
         return finish == ESP_ERR_OTA_VALIDATE_FAILED ? EOTA_UPDATE_SIGNATURE_INVALID :
@@ -362,6 +382,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     return EOTA_UPDATE_OK;
 abort:
     if (ota_started) (void)esp_ota_abort(handle);
+    eota_http_deadline_destroy(&deadline);
     (void)esp_http_client_cleanup(client);
     return result;
 #endif

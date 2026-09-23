@@ -2,6 +2,7 @@
 #include "esp_app_format.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
+#include "esp_timer.h"
 #include "esp_ota_ops.h"
 #include "psa/crypto.h"
 
@@ -35,12 +36,31 @@ static bool valid_old, complete, rollback_possible, bad_chip, fail_restore, fail
 static esp_ota_img_states_t target_state;
 static esp_err_t target_lookup;
 static bool stall_headers, stall_first_byte, stall_midbody, early_fin, fin_midbody, select_then_fail;
+static bool slow_drip_headers, slow_drip_body;
 static int status_code, init_calls, open_calls, header_calls, read_calls, cleanup_calls;
 static int begin_calls, write_calls, end_calls, abort_calls, select_calls, restore_calls, partition_reads;
 static int64_t content_length, now_us, read_advance_us;
 static esp_err_t end_result;
 static size_t stream_offset, staged_size;
 static uint32_t last_progress;
+struct esp_timer_fake {
+    void (*callback)(void *);
+    void *argument;
+    int64_t alarm_us;
+    bool active;
+};
+static struct esp_timer_fake fake_timer;
+static int deadline_callbacks;
+
+static void advance_time(int64_t delta_us)
+{
+    now_us += delta_us;
+    if (fake_timer.active && now_us >= fake_timer.alarm_us) {
+        fake_timer.active = false;
+        deadline_callbacks++;
+        fake_timer.callback(fake_timer.argument);
+    }
+}
 
 static void reset(void)
 {
@@ -51,6 +71,7 @@ static void reset(void)
     target_lookup = ESP_ERR_NOT_FOUND;
     bad_chip = fail_restore = fail_read = fail_select = false;
     stall_headers = stall_first_byte = stall_midbody = early_fin = fin_midbody = select_then_fail = false;
+    slow_drip_headers = slow_drip_body = false;
     status_code = 200;
     content_length = IMAGE_BYTES;
     end_result = ESP_OK;
@@ -59,6 +80,8 @@ static void reset(void)
     now_us = read_advance_us = 0;
     stream_offset = staged_size = 0;
     last_progress = 0;
+    deadline_callbacks = 0;
+    memset(&fake_timer, 0, sizeof fake_timer);
     memset(image_bytes, 0x5a, sizeof image_bytes);
     memset(staged_bytes, 0, sizeof staged_bytes);
     esp_image_header_t header = {.magic = ESP_IMAGE_HEADER_MAGIC, .chip_id = CHIP_ID};
@@ -76,6 +99,29 @@ static void digest(eota_image_t *request)
 }
 
 int64_t esp_timer_get_time(void) { return now_us; }
+esp_err_t esp_timer_create(const esp_timer_create_args_t *args, esp_timer_handle_t *out)
+{
+    assert(args && args->callback && args->dispatch_method == ESP_TIMER_TASK && out);
+    fake_timer.callback = args->callback;
+    fake_timer.argument = args->arg;
+    *out = &fake_timer;
+    return ESP_OK;
+}
+esp_err_t esp_timer_start_once(esp_timer_handle_t timer, uint64_t timeout_us)
+{
+    assert(timer == &fake_timer && !timer->active && timeout_us > 0);
+    timer->active = true;
+    timer->alarm_us = now_us + (int64_t)timeout_us;
+    return ESP_OK;
+}
+esp_err_t esp_timer_stop_blocking(esp_timer_handle_t timer, uint32_t timeout_ticks)
+{
+    assert(timer == &fake_timer && timeout_ticks == UINT32_MAX);
+    timer->active = false;
+    return ESP_OK;
+}
+esp_err_t esp_timer_delete(esp_timer_handle_t timer)
+{ assert(timer == &fake_timer && !timer->active); return ESP_OK; }
 int esp_crt_bundle_attach(void *config) { (void)config; return 0; }
 const esp_partition_t *esp_ota_get_running_partition(void) { return &old_slot; }
 const esp_partition_t *esp_ota_get_boot_partition(void) { return boot; }
@@ -150,6 +196,8 @@ esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *co
     assert(config->disable_auto_redirect && config->timeout_ms == (int)policy.connect_timeout_ms);
     return (void *)1;
 }
+int esp_http_client_get_socket(esp_http_client_handle_t client)
+{ assert(client); return 100000; }
 esp_err_t esp_http_client_open(esp_http_client_handle_t client, int write_len)
 { assert(client && write_len == 0); ++open_calls; return ESP_OK; }
 esp_err_t esp_http_client_set_timeout_ms(esp_http_client_handle_t client, int timeout_ms)
@@ -158,7 +206,12 @@ int64_t esp_http_client_fetch_headers(esp_http_client_handle_t client)
 {
     assert(client);
     ++header_calls;
-    if (stall_headers) { now_us += INT64_C(1000000); return -ESP_ERR_HTTP_EAGAIN; }
+    if (slow_drip_headers) {
+        /* Model one SDK call that never yields while receiving a byte/sec. */
+        for (int i = 0; i < 600 && deadline_callbacks == 0; ++i) advance_time(INT64_C(1000000));
+        return -ESP_ERR_HTTP_EAGAIN;
+    }
+    if (stall_headers) { advance_time(INT64_C(1000000)); return -ESP_ERR_HTTP_EAGAIN; }
     return content_length;
 }
 int esp_http_client_get_status_code(esp_http_client_handle_t client) { assert(client); return status_code; }
@@ -168,9 +221,13 @@ int esp_http_client_read(esp_http_client_handle_t client, char *buffer, int len)
 {
     assert(client && buffer && len > 0 && len <= 64);
     ++read_calls;
-    now_us += read_advance_us;
+    advance_time(read_advance_us);
+    if (slow_drip_body && stream_offset >= PREFIX_BYTES) {
+        for (int i = 0; i < 600 && deadline_callbacks == 0; ++i) advance_time(INT64_C(1000000));
+        return -ESP_ERR_HTTP_EAGAIN;
+    }
     if ((stall_first_byte && stream_offset == 0) || (stall_midbody && stream_offset >= PREFIX_BYTES)) {
-        now_us += INT64_C(1000000);
+        advance_time(INT64_C(1000000));
         return -ESP_ERR_HTTP_EAGAIN;
     }
     if (early_fin || (fin_midbody && stream_offset >= PREFIX_BYTES) || stream_offset >= sizeof image_bytes) return 0;
@@ -275,10 +332,16 @@ int main(void)
     assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && begin_calls == 0);
     reset(); stall_headers = true;
     assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && header_calls == 30 && read_calls == 0 && cleanup_calls == 1);
+    reset(); slow_drip_headers = true;
+    assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && header_calls == 1 &&
+           deadline_callbacks == 1 && now_us == INT64_C(30000000) && cleanup_calls == 1);
     reset(); stall_first_byte = true;
     assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && read_calls == 30 && begin_calls == 0 && cleanup_calls == 1);
     reset(); stall_midbody = true;
     assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && begin_calls == 1 && abort_calls == 1 && end_calls == 0);
+    reset(); slow_drip_body = true;
+    assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && deadline_callbacks == 1 &&
+           now_us == INT64_C(30000000) && begin_calls == 1 && abort_calls == 1);
     reset(); early_fin = true;
     assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && begin_calls == 0 && cleanup_calls == 1);
     reset(); fin_midbody = true;

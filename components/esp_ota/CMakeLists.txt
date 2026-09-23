@@ -1,4 +1,4 @@
-idf_component_register(SRCS "src/ota.c" "src/update.c"
+idf_component_register(SRCS "src/ota.c" "src/update.c" "src/http_deadline.c"
     INCLUDE_DIRS "include"
     REQUIRES app_update esp_partition esp_http_client esp_timer mbedtls bootloader_support)
 if(NOT CMAKE_BUILD_EARLY_EXPANSION)
