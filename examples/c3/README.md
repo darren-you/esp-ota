@@ -22,6 +22,6 @@ python3 ../../components/esp_ota/tools/check_sdk.py --path "$IDF_PATH"
 idf.py -C . build
 ```
 
-真实实验必须由维护者明确授权精确设备、分区及恢复基线，先建立受控签名运行/回退镜像。实验输入从仓外绝对路径传入 `-DEOTA_LAB_ARMED=ON -DEOTA_LAB_INPUTS=/absolute/path/lab_inputs.h`；格式见 `lab_inputs_example.h`。构建时复制到忽略的 build 目录，勿将凭据、签名私钥、真实设备身份或恢复件加入仓库。普通构建不具备签名升级能力，`eota_available` 将拒绝升级。
+真实实验必须由维护者明确授权精确设备、分区及恢复基线，先建立受控签名运行/回退镜像。实验输入从仓外且**构建目录外**的绝对路径传入 `-DEOTA_LAB_ARMED=ON -DEOTA_LAB_INPUTS=/absolute/path/lab_inputs.h`；格式见 `lab_inputs_example.h`。构建目录内的输入会在配置前被拒绝，避免多轮配置把输入文件覆盖为默认空值并让 OTA 代码从镜像中消失。构建时复制到忽略的 build 目录，勿将凭据、签名私钥、真实设备身份或恢复件加入仓库。普通构建不具备签名升级能力，`eota_available` 将拒绝升级。
 
 样例收到完整镜像后依次调用 `eota_preflight`、`eota_prepare`、`eota_select`，成功才重启；候选新启动只在本地检查和 30 秒稳定窗口后确认 pending。真实签名升级、断流、慢速滴流、回滚及恢复矩阵目前没有设备证据，按主计划继续未验收。人工断电测试暂缓。

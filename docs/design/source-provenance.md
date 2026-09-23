@@ -9,4 +9,4 @@
 | `firmware/tests/ota_confirmation_test.c` | `7a8d71474eb61d3a3490e82b76e15e2176095c9927ccadd528fe41ff5051c5a3` | `tests/ota_test.c`：继续编译真实确认机制并注入 SDK 故障 |
 | `firmware/tests/ota_update_test.c` | `935cb356ea02be6d6c1b03fe1b93258cc1a63b9c2c42d174037340f8eda5f266` | `tests/update_test.c`：继续编译真实升级机制，验证新双阶段与产品约束 |
 
-底层 HTTP、app_update、分区和密码 API 来自锁定的[公开 ESP-IDF fork](https://github.com/darren-you/esp-idf) `855937cf9dcee13ee9c423fb0319238cdc8d53fd`；其官方父提交为 `fff9895c82d744c7237be8847347bdd1b07c6643`，唯一源码修正为擦除失败时释放 OTA 句柄。本仓没有复制这些 SDK 实现。样例中固定的 C3 双槽地址只用于保留实验设备的当前布局，不成为库内默认策略。
+底层 HTTP、app_update、分区和密码 API 来自锁定的[公开 ESP-IDF fork](https://github.com/darren-you/esp-idf) `578cf89c343e388db43ba1f4ddcd602fedcb763c`；其官方父提交为 `fff9895c82d744c7237be8847347bdd1b07c6643`，当前两项源码修正分别在 OTA 擦除失败时释放句柄，以及 HTTP 客户端初始化的内建 TCP／TLS transport 注册失败时释放未交给列表的句柄。本仓没有复制这些 SDK 实现。样例中固定的 C3 双槽地址只用于保留实验设备的当前布局，不成为库内默认策略。

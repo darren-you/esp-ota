@@ -93,3 +93,15 @@ AppleClang ASan/UBSan host CTest 4/4 通过。锁定公开 ESP-IDF fork `855937c
 锁定公开 ESP-IDF fork `855937cf9dcee13ee9c423fb0319238cdc8d53fd` 与 esp-lwIP `2758df4cd3666b3b2a5b53830148379326425c0d` 的普通 ESP32-C3 样例构建通过，镜像 `0x287d0` 字节、SHA-256 `220825e0d07ae870fc38d6a8ba38d97f5ce7e51ac621815f4bf106151977004e`。仓外临时 RSA-3072 测试键与无效网络占位输入的签名 C3 构建通过，镜像 `0x111000` 字节、SHA-256 `a1ac24d0e9fc21bfc5ba043277ea916e4eb25c9b2c2e30f9c9677599ddc7faaa`；本机 RSA 验签成功，ELF map 包含 `eota_prepare`、`transport_read` 与官方 `esp_http_client_read`。构建未执行镜像、写设备或使用生产凭据。
 
 这项修正约束的是 TLS 每次返回后的再次调用。固定 SDK 单次密码学调用、HTTP 解析、Flash 和 `close` 仍不可抢占，且真实设备 HTTPS/Flash/bootloader 链路未测；P5-04 保持未验收。
+
+## 公开 SDK HTTP 初始化失败所有权修正锁定复验（2026-09-24）
+
+当前 `sdk-lock.json` 将 ESP-IDF 精确固定到公开 fork `578cf89c343e388db43ba1f4ddcd602fedcb763c`，lwIP 仍为 `2758df4cd3666b3b2a5b53830148379326425c0d`。新 SDK 修复了 `esp_http_client_init` 在内建 TCP／TLS transport 创建成功、列表登记失败时遗留尚未转交的句柄；OTA 的 custom transport 也会经过 SDK 的内建 transport 初始化。独立 SDK C3 QEMU 回归在修正前定点令 HTTP 列表登记返回 `ESP_ERR_NO_MEM`，连续八次失败使 8-bit 可用堆减少 1792 字节；修正后 HTTP 与 HTTPS 两条失败路径各八次的堆差均为零。该故障注入只验证初始化所有权，不模拟真实 TLS/Flash 故障。
+
+| 本仓验证 | 结果 | 边界 |
+| --- | --- | --- |
+| `check_sdk.py` 与 AppleClang ASan/UBSan host CTest | 锁定源码核对通过；含固定 SDK mbedTLS 4.1 真实 HTTPS 回环的 CTest 5/5 通过 | host 假件与本机 TLS 服务，不代表设备网络栈或 bootloader |
+| 固定 SDK 普通 ESP32-C3 样例 | `0x288d0` 字节，SHA-256 `0d56ab726753083deb0ed8e7b5677c791ab54fb63f056421063260c8ee414e53` | 默认未武装构建，不能执行签名升级 |
+| 仓外临时 RSA-3072 测试键、无效网络占位输入的签名 C3 样例 | `0x111000` 字节，SHA-256 `9c95b690d0265507cb03f7c4b994f7a54952d5700793ce90af3f4d16a63da0a3`；`espsecure verify-signature --version 2 --keyfile` 验签成功，ELF／map 确认 `eota_prepare`、`transport_read`、官方 HTTP 读取和 `esp_ota_begin` 均已链接 | 只编译与本机验签；没有执行镜像、刷板或使用生产凭据 |
+
+复验还发现样例的实验输入若恰放在构建目录根的 `lab_inputs.h`，多轮 CMake 配置会将它覆盖为默认空输入，导致表面上签名构建成功、实际 OTA 准备代码未进入 ELF。现在顶层 CMake 在配置前拒绝构建目录内输入；故障复现用例验证拒绝时原输入 SHA-256 不变，构建目录外的占位输入仍可完成签名构建。历史检查点的 SHA 均保留其当次验证事实。本次没有设备 HTTPS、Flash、切槽或回滚运行证据，P5-04 继续未验收。
