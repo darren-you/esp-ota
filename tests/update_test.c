@@ -46,7 +46,7 @@ static int transport_create_calls, transport_destroy_calls;
 static int begin_calls, write_calls, end_calls, abort_calls, select_calls, restore_calls, mark_calls, invalidate_calls, partition_reads;
 static int64_t content_length, now_us, read_advance_us;
 static int64_t begin_advance_us, write_advance_us, flash_read_advance_us;
-static int64_t end_advance_us, cleanup_advance_us;
+static int64_t end_advance_us, cleanup_advance_us, preflight_advance_us;
 static esp_err_t end_result;
 static size_t stream_offset, staged_size;
 static uint32_t last_progress;
@@ -83,7 +83,7 @@ static void reset(void)
     begin_calls = write_calls = end_calls = abort_calls = select_calls = restore_calls = mark_calls = invalidate_calls = partition_reads = 0;
     now_us = read_advance_us = 0;
     begin_advance_us = write_advance_us = flash_read_advance_us = 0;
-    end_advance_us = cleanup_advance_us = 0;
+    end_advance_us = cleanup_advance_us = preflight_advance_us = 0;
     stream_offset = staged_size = 0;
     last_progress = 0;
     memset(&fake_transport, 0, sizeof fake_transport);
@@ -112,6 +112,10 @@ const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *
 esp_err_t esp_ota_get_state_partition(const esp_partition_t *partition, esp_ota_img_states_t *state)
 {
     assert(partition == &old_slot || partition == &new_slot);
+    if (preflight_advance_us > 0) {
+        advance_time(preflight_advance_us);
+        preflight_advance_us = 0;
+    }
     if (partition == &old_slot) { *state = valid_old ? old_state : ESP_OTA_IMG_PENDING_VERIFY; return ESP_OK; }
     *state = target_state;
     return target_lookup;
@@ -387,6 +391,13 @@ int main(void)
     assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && abort_calls == 1 && end_calls == 0);
     reset(); read_advance_us = INT64_C(25000000);
     assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && now_us >= INT64_C(300000000) && end_calls == 0);
+    const uint32_t original_idle_timeout_ms = policy.idle_timeout_ms;
+    reset(); policy.idle_timeout_ms = policy.total_timeout_ms;
+    preflight_advance_us = INT64_C(300000001);
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) == EOTA_UPDATE_DOWNLOAD_FAILED &&
+           init_calls == 0 && transport_create_calls == 0 && begin_calls == 0 &&
+           prepared.image_size_bytes == 0 && now_us == INT64_C(300000001));
+    policy.idle_timeout_ms = original_idle_timeout_ms;
     reset(); begin_advance_us = INT64_C(30000000);
     assert(run_update(&request) == EOTA_UPDATE_DOWNLOAD_FAILED && begin_calls == 1 &&
            write_calls == 0 && end_calls == 0 && abort_calls == 1 && select_calls == 0);

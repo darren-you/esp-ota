@@ -61,3 +61,11 @@ AppleClang ASan/UBSan host CTest 5/5 通过，包括可控时钟对迟到字节�
 | 同一 SDK 临时 RSA-3072 测试键签名 C3 样例 | 使用仓外无效网络/镜像占位输入令实验分支参与链接；`0x111000` 字节，SHA-256 `788e5bf3c93cfeedda681f06dfef0487b218d51dc1e0e8281b4421ad4d050baf`，`espsecure verify-signature --version 2` 验签通过；ELF 确认 `eota_prepare`、custom transport 与 HTTP 读取均已链接 | 密钥与占位输入仅在仓外临时目录，未执行该镜像、刷板、改分区、eFuse 或使用生产凭据 |
 
 固定 lwIP `socket/close` 等待 TCP/IP 核心线程、mBed TLS 单步和 Flash SDK 调用仍不可抢占，故不把 30 秒或 5 分钟表述为整个 `eota_prepare` 的严格墙钟上界。P5-04 的受控实板 HTTPS、真实 DNS/lwIP、完整镜像下载/Flash/bootloader 与墙钟测量仍待执行；阶段未验收。
+
+## P5-04 槽预检期限起点收紧（2026-09-24）
+
+审计发现 `eota_prepare` 原来先通过 `inspect_slots` 读取运行/目标槽及 otadata，再初始化下载期限。回归将无进展期限设为与总期限相等，用固定假件在首次 `esp_ota_get_state_partition` 读取中推进单调时钟 `300000001` 微秒，旧实现仍开始下载并准备镜像；新增回归因此先按预期失败。现将期限初始化移到本次槽预检之前，预检返回后若期限耗尽即报 `EOTA_UPDATE_DOWNLOAD_FAILED`，不创建 HTTP 客户端、不擦写 Flash，也不产出 `prepared`。调用方单独调用的 `eota_preflight` 仍是另一项操作，不并入本次 `prepare` 期限。
+
+AppleClang ASan/UBSan 与固定 SDK mbedTLS 4.1 主机 CTest 5/5 通过。固定公开 ESP-IDF fork `855937cf9dcee13ee9c423fb0319238cdc8d53fd` 与 lwIP `2758df4cd3666b3b2a5b53830148379326425c0d` 的普通 C3 样例构建通过；仓外临时 RSA-3072 测试键与无效网络占位输入构建的签名 C3 镜像为 `0x111000` 字节、SHA-256 `2a1a09e45e750c3e868e934df8d7d77a750e898140c8d45f7101f6fc2232053d`，本机 RSA 验签通过，ELF 包含 `eota_prepare`、custom transport 与 `esp_ota_begin`。没有执行镜像或写设备。
+
+这次修改只阻止预检耗时被排除在期限统计外。固定 SDK 的 otadata/Flash 读写与擦除、镜像校验、HTTP/TLS 单步及 lwIP `socket/close` 仍是同步且不可由组件抢占的调用；进入其中任一步后，期限只能在返回时检查，不能强制 `eota_prepare` 在 5 分钟内返回。P5-04 继续未验收。

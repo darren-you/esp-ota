@@ -256,23 +256,24 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     (void)policy; (void)image; (void)progress; (void)context; (void)prepared;
     return EOTA_UPDATE_UNSUPPORTED;
 #else
-    if (policy == NULL || !policy->trusted_time || image == NULL || prepared == NULL ||
+    if (!valid_policy(policy) || !policy->trusted_time || image == NULL || prepared == NULL ||
         !valid_url(image->image_url)) return EOTA_UPDATE_INVALID_REQUEST;
     memset(prepared, 0, sizeof *prepared);
+    eota_http_deadline_t deadline = {0};
+    if (!eota_http_deadline_init(&deadline, policy->total_timeout_ms,
+                                 policy->idle_timeout_ms)) return EOTA_UPDATE_RESOURCE_FAILURE;
     eota_slots_t slots;
     const esp_partition_t *target = NULL;
     eota_result_t result = inspect_slots(policy, image->image_size_bytes, &slots, NULL, &target);
+    if (eota_http_deadline_remaining_us(&deadline) <= 0) return EOTA_UPDATE_DOWNLOAD_FAILED;
     if (result != EOTA_UPDATE_OK) return result;
     if (image->image_size_bytes < EOTA_PREFIX_BYTES) return EOTA_UPDATE_INVALID_REQUEST;
 
     esp_ota_handle_t handle = 0;
     bool ota_started = false;
-    eota_http_deadline_t deadline = {0};
     esp_transport_handle_t transport = NULL;
     esp_http_client_handle_t client = NULL;
     result = EOTA_UPDATE_RESOURCE_FAILURE;
-    if (!eota_http_deadline_init(&deadline, policy->total_timeout_ms,
-                                 policy->idle_timeout_ms)) goto abort;
     transport = eota_http_transport_create(&deadline, policy->connect_timeout_ms);
     if (transport == NULL) goto abort;
     const esp_http_client_config_t http = {
