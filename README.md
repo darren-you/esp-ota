@@ -10,7 +10,7 @@ flowchart LR
     api --> preflight["preflight：运行槽、目标槽与产品约束"]
     api --> identity["verified image：验签与完整镜像摘要"]
     api --> prepare["prepare：HTTPS、镜像头、写槽、整镜像摘要与签名"]
-    api --> select["select：重新读回摘要、签名和 boot selector"]
+    api --> select["select：重新读回摘要、产品目标、签名和 boot selector"]
     api --> confirm["inspect / confirm / reject：pending 槽确认或回滚"]
     prepare --> transport["http_transport：异步 DNS、非阻塞 TCP / TLS、请求与响应"]
     prepare --> deadline
@@ -26,7 +26,7 @@ flowchart LR
     sample["examples/c3：无私有依赖的实验固件"] --> api
 ```
 
-准备阶段用 IDF 写 inactive 应用槽并验证完整 signed bin，**不切启动槽**；`esp_ota_begin` 可能清除该槽原有的 otadata 记录。应用可在两阶段之间持久提交与业务包的绑定；`eota_select` 再核对实际槽、摘要与 IDF 签名，并显式切槽。切槽失败时库恢复旧运行槽的 VALID 状态并清除未启动候选的 NEW 状态，读回不确定则明确报错。库不创建 worker、不写业务 NVS、不管理 Wasm 包，也不替应用决定何时确认新固件。具体调用合同见 [API 说明](docs/design/api-contract.md)。
+准备阶段用 IDF 写 inactive 应用槽并验证完整 signed bin，**不切启动槽**；`esp_ota_begin` 可能清除该槽原有的 otadata 记录。应用可在两阶段之间持久提交与业务包的绑定；`eota_select` 再核对实际槽、摘要、当前可信产品约束与 IDF 签名，并显式切槽。切槽失败时库恢复旧运行槽的 VALID 状态并清除未启动候选的 NEW 状态，读回不确定则明确报错。库不创建 worker、不写业务 NVS、不管理 Wasm 包，也不替应用决定何时确认新固件。具体调用合同见 [API 说明](docs/design/api-contract.md)。
 
 ## 独立构建
 

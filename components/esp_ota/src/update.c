@@ -156,6 +156,23 @@ static bool valid_url(const char *url)
     return true;
 }
 
+static bool matches_image_target(const eota_policy_t *policy,
+                                 const uint8_t prefix[EOTA_PREFIX_BYTES])
+{
+    esp_image_header_t image_header;
+    esp_app_desc_t app_desc;
+    memcpy(&image_header, prefix, sizeof image_header);
+    memcpy(&app_desc, prefix + sizeof image_header + sizeof(esp_image_segment_header_t),
+           sizeof app_desc);
+    return image_header.magic == ESP_IMAGE_HEADER_MAGIC &&
+           image_header.chip_id == policy->chip_id &&
+           app_desc.magic_word == ESP_APP_DESC_MAGIC_WORD &&
+           strncmp(app_desc.project_name, policy->project_name,
+                   sizeof app_desc.project_name) == 0 &&
+           esp_ota_check_image_validity(ESP_PARTITION_TYPE_APP, &image_header,
+                                        &app_desc) == ESP_OK;
+}
+
 static eota_result_t hash_partition(const esp_partition_t *partition, uint32_t size,
                                     uint8_t digest[EOTA_SHA256_BYTES],
                                     const eota_http_deadline_t *deadline)
@@ -333,16 +350,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
         received += (uint32_t)count;
         if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
         if (received == sizeof prefix) {
-            esp_image_header_t image_header;
-            esp_app_desc_t app_desc;
-            memcpy(&image_header, prefix, sizeof image_header);
-            memcpy(&app_desc, prefix + sizeof image_header + sizeof(esp_image_segment_header_t),
-                   sizeof app_desc);
-            if (image_header.magic != ESP_IMAGE_HEADER_MAGIC ||
-                image_header.chip_id != policy->chip_id ||
-                app_desc.magic_word != ESP_APP_DESC_MAGIC_WORD ||
-                strncmp(app_desc.project_name, policy->project_name, sizeof app_desc.project_name) != 0 ||
-                esp_ota_check_image_validity(ESP_PARTITION_TYPE_APP, &image_header, &app_desc) != ESP_OK) {
+            if (!matches_image_target(policy, prefix)) {
                 result = EOTA_UPDATE_WRONG_TARGET;
                 goto abort;
             }
@@ -394,7 +402,9 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
     (void)policy; (void)prepared;
     return EOTA_UPDATE_UNSUPPORTED;
 #else
-    if (prepared == NULL) return EOTA_UPDATE_INVALID_REQUEST;
+    if (prepared == NULL || prepared->image_size_bytes < EOTA_PREFIX_BYTES) {
+        return EOTA_UPDATE_INVALID_REQUEST;
+    }
     eota_slots_t slots;
     const esp_partition_t *running = NULL;
     const esp_partition_t *target = NULL;
@@ -406,6 +416,11 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
     result = hash_partition(target, prepared->image_size_bytes, digest, NULL);
     if (result != EOTA_UPDATE_OK) return result;
     if (memcmp(digest, prepared->sha256, sizeof digest) != 0) return EOTA_UPDATE_HASH_MISMATCH;
+    uint8_t prefix[EOTA_PREFIX_BYTES];
+    if (esp_partition_read(target, 0, prefix, sizeof prefix) != ESP_OK) {
+        return EOTA_UPDATE_RESOURCE_FAILURE;
+    }
+    if (!matches_image_target(policy, prefix)) return EOTA_UPDATE_WRONG_TARGET;
     const esp_err_t select = esp_ota_set_boot_partition(target);
     const bool target_selected = same_partition(esp_ota_get_boot_partition(), target);
     if (select == ESP_OK && target_selected && esp_ota_check_rollback_is_possible()) {

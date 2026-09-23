@@ -349,8 +349,25 @@ int main(void)
     assert(eota_select(&policy, &prepared) == EOTA_UPDATE_OK);
     assert(begin_calls == 1 && write_calls > 1 && staged_size == IMAGE_BYTES);
     assert(memcmp(staged_bytes, image_bytes, IMAGE_BYTES) == 0);
-    assert(partition_reads == 4 && end_calls == 1 && abort_calls == 0 && cleanup_calls == 1);
+    assert(partition_reads == 5 && end_calls == 1 && abort_calls == 0 && cleanup_calls == 1);
     assert(select_calls == 1 && last_progress == IMAGE_BYTES && boot == &new_slot);
+    reset(); digest(&request);
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) == EOTA_UPDATE_OK);
+    strcpy(policy.project_name, "other_product");
+    assert(eota_select(&policy, &prepared) == EOTA_UPDATE_WRONG_TARGET &&
+           select_calls == 0 && boot == &old_slot);
+    strcpy(policy.project_name, "esp_base");
+    policy.chip_id++;
+    assert(eota_select(&policy, &prepared) == EOTA_UPDATE_WRONG_TARGET &&
+           select_calls == 0 && boot == &old_slot);
+    policy.chip_id--;
+    bad_chip = true;
+    assert(eota_select(&policy, &prepared) == EOTA_UPDATE_WRONG_TARGET &&
+           select_calls == 0 && boot == &old_slot);
+    bad_chip = false;
+    prepared.image_size_bytes = PREFIX_BYTES - 1;
+    assert(eota_select(&policy, &prepared) == EOTA_UPDATE_INVALID_REQUEST &&
+           select_calls == 0 && boot == &old_slot);
     reset(); boot = &new_slot;
     assert(eota_observe_slots(&policy, &slots) == EOTA_UPDATE_OK &&
            slots.boot_subtype == ESP_PARTITION_SUBTYPE_APP_OTA_1 &&

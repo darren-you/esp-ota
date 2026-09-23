@@ -106,7 +106,8 @@ eota_result_t eota_preflight(const eota_policy_t *policy, uint32_t image_size_by
  * callback must neither block nor call eota_* recursively. */
 eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *image,
                            eota_progress_t progress, void *context, eota_prepared_t *prepared);
-/* Rechecks slots, full signed image digest and SDK signature verification,
+/* Rechecks slots, full signed image digest, the current trusted project's
+ * image header and SDK signature verification,
  * then selects the target boot slot. On selection failure it restores the
  * running slot's VALID state and clears an unbooted NEW target entry; any
  * uncertain durable state is reported explicitly. */

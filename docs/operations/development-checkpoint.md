@@ -77,3 +77,9 @@ AppleClang ASan/UBSan 与固定 SDK mbedTLS 4.1 主机 CTest 5/5 通过。固定
 AppleClang ASan/UBSan host CTest 4/4 通过，假件覆盖完整 signed bin 末尾字节、坏镜像、Flash 失败、错误分区几何和失败输出清零。固定 SDK 普通 C3 样例构建通过，镜像 `0x28730` 字节；仓外临时 RSA-3072 测试键的签名 C3 样例构建通过，镜像 `0x31000` 字节，SHA-256 `8ae3a2828272853ac31eaf9f53bf0670e63fe11523e9615673ddd1f040d28167`，本机 `espsecure verify-signature --version 2 --keyfile` 验签通过。未刷设备、改分区或用生产凭据。
 
 本切片只给出**已验签镜像字节身份**。固定 bootloader 在下一次启动会把 `PENDING_VERIFY` 标成 `ABORTED`，而 `NEW` 是尚未经历启动/自检的候选；`esp_ota_get_boot_partition` 自身也不保证镜像有效。Base/Container 尚缺在同一串行所有权下对真实 otadata、boot selector、回退资格及业务包绑定的联合状态转换；当前 Base 也没有独立包分区。因此不能把镜像摘要直接作为 `econtainer_slot_firmware_set_t` 的已证实可启动集合，P6-10/P7-04 仍未验收。
+
+## 选槽阶段重验当前产品目标（2026-09-24）
+
+审计发现 `eota_select` 原来只重验槽几何、完整镜像 SHA-256 与 SDK 签名；同一份已准备的合法签名镜像若在两阶段之间改用另一项目名或芯片 ID 的可信 policy，仍会进入 boot selector。新增故障回归先在旧实现复现选槽，随后将准备阶段的镜像头核对抽为共用函数：选槽前从目标 Flash 读回头与应用描述，按本次 policy 重验项目、芯片、magic 与 SDK 有效性，失败时不写 otadata。短于镜像头的准备记录直接拒绝。
+
+AppleClang ASan/UBSan host CTest 4/4 通过。锁定公开 ESP-IDF fork `855937cf9dcee13ee9c423fb0319238cdc8d53fd` 与 esp-lwIP `2758df4cd3666b3b2a5b53830148379326425c0d` 的普通 C3 样例编译通过；仓外临时 RSA-3072 测试键签名 C3 样例编译并验签通过，镜像 `0x31000` 字节、SHA-256 `901b3fad3c924f42fe70421656ccca6d0d769ff420814db10996e09e342b3c1e`。以上没有设备写入或真实切槽；P5-04 的实板 HTTPS、Flash 与回滚验收仍未完成。
