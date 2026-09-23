@@ -1,0 +1,9 @@
+/build/
+/sdkconfig
+/sdkconfig.old
+/examples/c3/build/
+/examples/c3/sdkconfig
+/examples/c3/sdkconfig.old
+/examples/c3/dependencies.lock
+/examples/c3/managed_components/
+/examples/c3/lab_inputs.h

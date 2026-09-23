@@ -1,0 +1,34 @@
+schema_version: 5
+name: esp-ota
+workspace_area: tooling
+archetype: tooling-repo
+lifecycle: incubating
+owner: darren-you
+governance_tier: standard
+domains:
+  - firmware-update
+domain_roots:
+  firmware-update:
+    - .
+delivery_surfaces:
+  - idf-component
+depends_on:
+  - esp-lwip
+default_workflows:
+  - test-idf-component
+doc_status:
+  architecture: present
+  api: present
+  release: missing
+github:
+  repo: darren-you/esp-ota
+  visibility: public
+  about: 基于 ESP-IDF 官方机制的独立签名固件 OTA 组件
+  topics:
+    - darren-space
+    - tooling-repo
+    - idf-component
+    - firmware-update
+entrypoints:
+  - README.md
+  - AGENTS.md
