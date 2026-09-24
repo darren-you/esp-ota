@@ -51,7 +51,7 @@ static int transport_create_calls, transport_destroy_calls;
 static int begin_calls, write_calls, end_calls, abort_calls, select_calls, restore_calls, mark_calls, invalidate_calls, partition_reads;
 static int64_t content_length, now_us, read_advance_us;
 static int64_t begin_advance_us, write_advance_us, flash_read_advance_us;
-static int64_t end_advance_us, cleanup_advance_us, preflight_advance_us;
+static int64_t end_advance_us, cleanup_advance_us, preflight_advance_us, verify_advance_us;
 static esp_err_t end_result;
 static size_t stream_offset, staged_size;
 static uint32_t last_progress;
@@ -92,7 +92,7 @@ static void reset(void)
     begin_calls = write_calls = end_calls = abort_calls = select_calls = restore_calls = mark_calls = invalidate_calls = partition_reads = 0;
     now_us = read_advance_us = 0;
     begin_advance_us = write_advance_us = flash_read_advance_us = 0;
-    end_advance_us = cleanup_advance_us = preflight_advance_us = 0;
+    end_advance_us = cleanup_advance_us = preflight_advance_us = verify_advance_us = 0;
     stream_offset = staged_size = 0;
     last_progress = 0;
     memset(&fake_transport, 0, sizeof fake_transport);
@@ -135,6 +135,7 @@ esp_err_t esp_image_verify(esp_image_load_mode_t mode,
     assert((part->offset == old_slot.address && part->size == old_slot.size) ||
            (part->offset == new_slot.address && part->size == new_slot.size));
     ++image_verify_calls;
+    advance_time(verify_advance_us);
     if (image_verify_result != ESP_OK) return image_verify_result;
     metadata->image_len = verified_image_size_bytes;
     return ESP_OK;
@@ -351,6 +352,42 @@ int main(void)
     assert(memcmp(staged_bytes, image_bytes, IMAGE_BYTES) == 0);
     assert(partition_reads == 5 && end_calls == 1 && abort_calls == 0 && cleanup_calls == 1);
     assert(select_calls == 1 && last_progress == IMAGE_BYTES && boot == &new_slot);
+    /* The SDK verifies the whole partition, including bytes left beyond this
+     * request's erased/written range. A valid signature alone does not bind
+     * the receipt's size and digest to the complete signed image. */
+    reset(); digest(&request); verified_image_size_bytes = IMAGE_BYTES + 4096;
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) == EOTA_UPDATE_INVALID_REQUEST &&
+           prepared.image_size_bytes == 0 && select_calls == 0 && boot == &old_slot);
+    reset(); digest(&request); verified_image_size_bytes = IMAGE_BYTES - 16;
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) == EOTA_UPDATE_INVALID_REQUEST &&
+           prepared.image_size_bytes == 0 && select_calls == 0 && boot == &old_slot);
+    reset(); digest(&request);
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) == EOTA_UPDATE_OK);
+    verified_image_size_bytes = IMAGE_BYTES + 4096;
+    assert(eota_select(&policy, &prepared) == EOTA_UPDATE_INVALID_REQUEST &&
+           select_calls == 0 && boot == &old_slot);
+    verified_image_size_bytes = IMAGE_BYTES - 16;
+    assert(eota_select(&policy, &prepared) == EOTA_UPDATE_INVALID_REQUEST &&
+           select_calls == 0 && boot == &old_slot);
+    verified_image_size_bytes = IMAGE_BYTES;
+    image_verify_result = ESP_ERR_IMAGE_INVALID;
+    assert(eota_select(&policy, &prepared) == EOTA_UPDATE_SIGNATURE_INVALID &&
+           select_calls == 0 && boot == &old_slot);
+    image_verify_result = ESP_ERR_IMAGE_FLASH_FAIL;
+    assert(eota_select(&policy, &prepared) == EOTA_UPDATE_RESOURCE_FAILURE &&
+           select_calls == 0 && boot == &old_slot);
+    reset(); digest(&request); image_verify_result = ESP_ERR_IMAGE_INVALID;
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) == EOTA_UPDATE_SIGNATURE_INVALID &&
+           end_calls == 1 && abort_calls == 0 && prepared.image_size_bytes == 0 &&
+           select_calls == 0 && boot == &old_slot);
+    reset(); digest(&request); image_verify_result = ESP_ERR_NO_MEM;
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) == EOTA_UPDATE_RESOURCE_FAILURE &&
+           end_calls == 1 && abort_calls == 0 && prepared.image_size_bytes == 0 &&
+           select_calls == 0 && boot == &old_slot);
+    reset(); digest(&request); verify_advance_us = INT64_C(30000000);
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) == EOTA_UPDATE_DOWNLOAD_FAILED &&
+           image_verify_calls == 1 && end_calls == 1 && abort_calls == 0 &&
+           prepared.image_size_bytes == 0 && select_calls == 0 && boot == &old_slot);
     reset(); digest(&request);
     assert(eota_prepare(&policy, &request, progress, NULL, &prepared) == EOTA_UPDATE_OK);
     strcpy(policy.project_name, "other_product");
@@ -393,6 +430,15 @@ int main(void)
     assert(eota_sha256_running(&policy, IMAGE_BYTES, running_digest) == EOTA_UPDATE_OK &&
            memcmp(running_digest, request.sha256, sizeof running_digest) == 0);
     assert(eota_sha256_running(&policy, old_slot.size + 1, running_digest) == EOTA_UPDATE_TOO_LARGE);
+    reset();
+    memset(running_digest, 0xa5, sizeof running_digest);
+    assert(eota_sha256_running(&policy, IMAGE_BYTES - 16, running_digest) == EOTA_UPDATE_INVALID_REQUEST &&
+           running_digest[0] == 0 && partition_reads == 0);
+    assert(eota_sha256_running(&policy, IMAGE_BYTES + 1, running_digest) == EOTA_UPDATE_INVALID_REQUEST &&
+           running_digest[0] == 0 && partition_reads == 0);
+    image_verify_result = ESP_ERR_IMAGE_INVALID;
+    assert(eota_sha256_running(&policy, IMAGE_BYTES, running_digest) == EOTA_UPDATE_SIGNATURE_INVALID &&
+           running_digest[0] == 0 && partition_reads == 0);
     reset(); digest(&request);
     uint32_t verified_size = UINT32_MAX;
     memset(running_digest, 0xa5, sizeof running_digest);

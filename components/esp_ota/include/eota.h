@@ -112,7 +112,8 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
  * running slot's VALID state and clears an unbooted NEW target entry; any
  * uncertain durable state is reported explicitly. */
 eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *prepared);
-/* Hash exactly size_bytes of the current running app, including its signature. */
+/* Verify the running app, require size_bytes to equal the SDK's complete signed
+ * image length, then hash those bytes. Prefixes and trailing bytes are refused. */
 eota_result_t eota_sha256_running(const eota_policy_t *policy, uint32_t size_bytes,
                                   uint8_t digest[EOTA_SHA256_BYTES]);
 /* Verify one exact OTA app image with the SDK (including its signature), then

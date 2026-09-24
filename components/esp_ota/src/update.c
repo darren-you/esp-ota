@@ -210,6 +210,29 @@ static eota_result_t hash_partition(const esp_partition_t *partition, uint32_t s
     return EOTA_UPDATE_OK;
 }
 
+static eota_result_t verify_image_size(const esp_partition_t *partition, uint32_t size,
+                                       const eota_http_deadline_t *deadline)
+{
+    const esp_partition_pos_t position = {
+        .offset = partition->address,
+        .size = partition->size,
+    };
+    esp_image_metadata_t metadata = {0};
+    /* end/set_boot verify the whole partition but do not report the signed
+     * image length. The requested prefix can otherwise borrow a valid old
+     * tail beyond esp_ota_begin's erased range. Use verified SDK metadata;
+     * esp_image_get_metadata omits the signature from its image_len. */
+    const esp_err_t verified = esp_image_verify(ESP_IMAGE_VERIFY, &position, &metadata);
+    if (deadline != NULL && eota_http_deadline_remaining_us(deadline) <= 0) {
+        return EOTA_UPDATE_DOWNLOAD_FAILED;
+    }
+    if (verified != ESP_OK) {
+        return verified == ESP_ERR_NO_MEM || verified == ESP_ERR_IMAGE_FLASH_FAIL ?
+               EOTA_UPDATE_RESOURCE_FAILURE : EOTA_UPDATE_SIGNATURE_INVALID;
+    }
+    return metadata.image_len == size ? EOTA_UPDATE_OK : EOTA_UPDATE_INVALID_REQUEST;
+}
+
 static bool same_slots(const eota_slots_t *a, const eota_slots_t *b)
 {
     return a->running_subtype == b->running_subtype && a->boot_subtype == b->boot_subtype &&
@@ -385,6 +408,8 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
                EOTA_UPDATE_DOWNLOAD_FAILED;
     }
     if (eota_http_deadline_remaining_us(&deadline) <= 0) return EOTA_UPDATE_DOWNLOAD_FAILED;
+    result = verify_image_size(target, image->image_size_bytes, &deadline);
+    if (result != EOTA_UPDATE_OK) return result;
     *prepared = (eota_prepared_t){.slots = slots, .image_size_bytes = image->image_size_bytes};
     memcpy(prepared->sha256, image->sha256, sizeof prepared->sha256);
     return EOTA_UPDATE_OK;
@@ -421,6 +446,8 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
         return EOTA_UPDATE_RESOURCE_FAILURE;
     }
     if (!matches_image_target(policy, prefix)) return EOTA_UPDATE_WRONG_TARGET;
+    result = verify_image_size(target, prepared->image_size_bytes, NULL);
+    if (result != EOTA_UPDATE_OK) return result;
     const esp_err_t select = esp_ota_set_boot_partition(target);
     const bool target_selected = same_partition(esp_ota_get_boot_partition(), target);
     if (select == ESP_OK && target_selected && esp_ota_check_rollback_is_possible()) {
@@ -477,6 +504,8 @@ eota_result_t eota_sha256_running(const eota_policy_t *policy, uint32_t size_byt
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (!expected_slot(running, policy)) return EOTA_UPDATE_SLOT_UNAVAILABLE;
     if (size_bytes > running->size) return EOTA_UPDATE_TOO_LARGE;
+    const eota_result_t result = verify_image_size(running, size_bytes, NULL);
+    if (result != EOTA_UPDATE_OK) return result;
     return hash_partition(running, size_bytes, digest, NULL);
 #endif
 }

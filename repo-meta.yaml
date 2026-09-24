@@ -21,7 +21,7 @@ doc_status:
   api: present
   release: missing
 github:
-  repo: darren-you/esp-ota
+  repo: esp-space/esp-ota
   visibility: public
   about: 基于 ESP-IDF 官方机制的独立签名固件 OTA 组件
   topics:
