@@ -101,7 +101,7 @@ eota_result_t eota_preflight(const eota_policy_t *policy, uint32_t image_size_by
 /* Synchronously downloads into the inactive slot and verifies its complete
  * signed bytes. It does not select a new boot slot or reboot. ESP-IDF may
  * invalidate the inactive slot's previous otadata entry at esp_ota_begin.
- * Caller owns the worker,
+ * Every failure clears a supplied prepared receipt. Caller owns the worker,
  * network/time preconditions, operation receipt and serialization. Progress
  * callback must neither block nor call eota_* recursively. */
 eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *image,

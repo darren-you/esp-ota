@@ -303,13 +303,13 @@ eota_result_t eota_observe_slots(const eota_policy_t *policy, eota_slots_t *slot
 eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *image,
                            eota_progress_t progress, void *context, eota_prepared_t *prepared)
 {
+    if (prepared != NULL) memset(prepared, 0, sizeof *prepared);
 #if !EOTA_SIGNED_ENABLED
-    (void)policy; (void)image; (void)progress; (void)context; (void)prepared;
+    (void)policy; (void)image; (void)progress; (void)context;
     return EOTA_UPDATE_UNSUPPORTED;
 #else
     if (!valid_policy(policy) || !policy->trusted_time || image == NULL || prepared == NULL ||
         !valid_url(image->image_url)) return EOTA_UPDATE_INVALID_REQUEST;
-    memset(prepared, 0, sizeof *prepared);
     eota_http_deadline_t deadline = {0};
     if (!eota_http_deadline_init(&deadline, policy->total_timeout_ms,
                                  policy->idle_timeout_ms)) return EOTA_UPDATE_RESOURCE_FAILURE;

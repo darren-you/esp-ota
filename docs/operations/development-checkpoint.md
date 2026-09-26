@@ -122,3 +122,9 @@ AppleClang ASan/UBSan host CTest 4/4 通过。锁定公开 ESP-IDF fork `855937c
 签名构建只使用仓外测试键、无效网络占位输入以及独立 build/sdkconfig。C3 使用已确认的现有 C3 样例分区；ESP32 的仓外 CSV 依据两份逐字节一致的 4 MiB Flash 只读备份：分区表位于 `0x8000`，`phy_init@0xf000/0x1000`、`otadata@0x10000/0x2000`、`nvs@0x12000/0xe000`、`at_customize` type `0x40`/subtype `0x00` `@0x20000/0xe0000`、`ota_0@0x100000/0x180000`、`ota_1@0x280000/0x180000`。固定 SDK 的官方分区解析器读回生成表与上述几何一致。该表只作为当前旧板的**离线编译输入**，不代表新 Container 目标布局。
 
 ESP32 当前 `otadata` 两扇区全 `0xff`，`ota_0` 是 2017 年 AT 固件，`ota_1` 全 `0xff`；它没有与本次临时 ECDSA 测试键匹配的签名运行与回退基线。离线签名、编译、镜像摘要和 host 假件不能证明现有 bootloader 可启动本次镜像，也不证明 OTA 下载、Flash 写入、运行时验签、确认或回滚。没有连接或写入两台设备，没有烧 eFuse、改生产密钥或替换分区。P5-04 至 P5-06 及 Base/Container 接入的设备验收仍待按五仓主计划执行。
+
+## 准备失败后旧收据失效（2026-09-26）
+
+审查发现 `eota_prepare` 对无效 URL 或尚未建立可信时间的请求会在清零 `prepared` 之前返回。若调用方复用上一次成功准备的输出对象，这次失败会留下旧收据；旧源码在“先成功准备，再提交 HTTP URL”回归中确定性违反收据清零断言。现于函数入口清零非空输出，包括未启用签名 OTA 的分支；失败请求之后的 `eota_select` 因无有效收据而拒绝切槽。调用方仍必须检查返回值，不能把清零当作授权或并发保护。
+
+本机 AppleClang ASan/UBSan 直接编译同一份 `update.c` 故障矩阵，C3 `chip_id=5` 与 ESP32 `chip_id=0` 均通过；本机独立 `http_transport` ASan/UBSan 测试通过。`mac-work-1` 的固定 IDF `578cf89c343e388db43ba1f4ddcd602fedcb763c` 下，两目标默认未武装样例构建通过，镜像分别为 C3 `0x28190`、ESP32 `0x264b0` 字节；它们不运行签名升级。该机启用真实 mbedTLS 回环的 CTest 共 6 项，其中 `update`、`update_esp32`、`http_deadline`、`confirmation` 通过；`http_transport` 和 `real_https` 的毫秒级时序断言未通过，普通与 ASan/UBSan 构建均复现。后两项只编译传输/期限源码，不包含本次修改的 `update.c`，本轮不能声称完整 host suite 通过，也不把时序失败归因为已证实的宿主负载。没有设备 HTTPS、Flash 或 bootloader 验证；P5 各项验收状态不变。

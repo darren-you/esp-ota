@@ -352,6 +352,22 @@ int main(void)
     assert(memcmp(staged_bytes, image_bytes, IMAGE_BYTES) == 0);
     assert(partition_reads == 5 && end_calls == 1 && abort_calls == 0 && cleanup_calls == 1);
     assert(select_calls == 1 && last_progress == IMAGE_BYTES && boot == &new_slot);
+    /* A rejected new request must invalidate a receipt left by a previous
+     * successful prepare, even when rejection happens before preflight. */
+    reset(); digest(&request);
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) == EOTA_UPDATE_OK);
+    eota_image_t rejected = request;
+    rejected.image_url = "http://example.test/esp-base.bin";
+    assert(eota_prepare(&policy, &rejected, progress, NULL, &prepared) == EOTA_UPDATE_INVALID_REQUEST &&
+           prepared.image_size_bytes == 0 && prepared.sha256[0] == 0);
+    assert(eota_select(&policy, &prepared) == EOTA_UPDATE_INVALID_REQUEST &&
+           select_calls == 0 && boot == &old_slot);
+    reset(); digest(&request);
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) == EOTA_UPDATE_OK);
+    policy.trusted_time = false;
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) == EOTA_UPDATE_INVALID_REQUEST &&
+           prepared.image_size_bytes == 0 && select_calls == 0);
+    policy.trusted_time = true;
     /* The SDK verifies the whole partition, including bytes left beyond this
      * request's erased/written range. A valid signature alone does not bind
      * the receipt's size and digest to the complete signed image. */
