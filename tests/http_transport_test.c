@@ -3,17 +3,44 @@
 #include <assert.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
-int64_t esp_timer_get_time(void)
+static atomic_bool simulated_clock_enabled;
+static atomic_int_fast64_t simulated_time_us;
+
+static int64_t monotonic_time_us(void)
 {
     struct timespec now;
     assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
     return (int64_t)now.tv_sec * INT64_C(1000000) + now.tv_nsec / 1000;
+}
+
+int64_t esp_timer_get_time(void)
+{
+    return atomic_load(&simulated_clock_enabled) ?
+           atomic_load(&simulated_time_us) : monotonic_time_us();
+}
+
+static void simulate_clock(void)
+{
+    atomic_store(&simulated_time_us, monotonic_time_us());
+    atomic_store(&simulated_clock_enabled, true);
+}
+
+static void advance_clock(int64_t duration_us)
+{
+    assert(atomic_load(&simulated_clock_enabled));
+    atomic_fetch_add(&simulated_time_us, duration_us);
+}
+
+static void restore_clock(void)
+{
+    atomic_store(&simulated_clock_enabled, false);
 }
 
 static void sleep_ms(long ms)
@@ -70,8 +97,9 @@ static atomic_int tcpip_delay_ms;
 static atomic_int tcpip_pending;
 static atomic_int verification_flags;
 static atomic_int tls_mode;
+static atomic_int simulated_handshake_steps;
 enum { TLS_NORMAL, TLS_SLOW_HANDSHAKE, TLS_SLOW_WRITE, TLS_VERIFY_FAIL, TLS_FATAL_READ,
-       TLS_SLOW_RECORD, TLS_REPEATED_TICKETS };
+       TLS_SLOW_RECORD, TLS_REPEATED_TICKETS, TLS_STEADY_READ, TLS_RETRY_TIMEOUT };
 typedef struct { dns_found_callback callback; void *argument; char name[256]; } dns_job_t;
 static void *dns_worker(void *argument) {
     dns_job_t *job=argument; sleep_ms(atomic_load(&dns_delay_ms));
@@ -105,12 +133,30 @@ void mbedtls_ssl_conf_authmode(mbedtls_ssl_config *c,int mode) { (void)c;assert(
 int mbedtls_ssl_setup(mbedtls_ssl_context *s,const mbedtls_ssl_config *c) { (void)s;(void)c;return 0; }
 void mbedtls_ssl_set_bio(mbedtls_ssl_context *s,void *ctx,int (*send_fn)(void *,const unsigned char *,size_t),int (*recv_fn)(void *,unsigned char *,size_t),void *unused) { (void)unused;s->context=ctx;s->send=send_fn;s->recv=recv_fn; }
 int mbedtls_ssl_is_handshake_over(const mbedtls_ssl_context *s) { return s->handshake_count>=1; }
-int mbedtls_ssl_handshake_step(mbedtls_ssl_context *s) { unsigned char byte; int n=s->recv(s->context,&byte,1); if(n==1 && byte=='H') { s->handshake_count=1;return 0; } return n==MBEDTLS_ERR_NET_RECV_FAILED?n:MBEDTLS_ERR_SSL_WANT_READ; }
+int mbedtls_ssl_handshake_step(mbedtls_ssl_context *s) {
+    if(atomic_load(&tls_mode)==TLS_SLOW_HANDSHAKE) {
+        /* A crypto step can finish after the connect deadline. */
+        atomic_fetch_add(&simulated_handshake_steps,1);
+        advance_clock(45000);
+        return MBEDTLS_ERR_SSL_WANT_WRITE;
+    }
+    unsigned char byte; int n=s->recv(s->context,&byte,1); if(n==1 && byte=='H') { s->handshake_count=1;return 0; } return n==MBEDTLS_ERR_NET_RECV_FAILED?n:MBEDTLS_ERR_SSL_WANT_READ;
+}
 int mbedtls_ssl_read(mbedtls_ssl_context *s,unsigned char *buffer,size_t length) {
     if(atomic_load(&tls_mode)==TLS_FATAL_READ) return -0x7777;
+    if(atomic_load(&tls_mode)==TLS_RETRY_TIMEOUT) {
+        advance_clock(20000);
+        return MBEDTLS_ERR_SSL_WANT_READ;
+    }
+    if(atomic_load(&tls_mode)==TLS_STEADY_READ) {
+        int result=s->recv(s->context,buffer,length);
+        if(result>0) advance_clock(15000);
+        return result;
+    }
     if(atomic_load(&tls_mode)==TLS_REPEATED_TICKETS) {
         /* TLS 1.3 post-handshake tickets can be returned without app data. */
-        sleep_ms(5);
+        if(atomic_load(&simulated_clock_enabled)) advance_clock(5000);
+        else sleep_ms(5);
         return MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET;
     }
     if(atomic_load(&tls_mode)==TLS_SLOW_RECORD) {
@@ -119,6 +165,7 @@ int mbedtls_ssl_read(mbedtls_ssl_context *s,unsigned char *buffer,size_t length)
             int count=s->recv(s->context,&byte,1);
             if(count<=0) return count;
             s->record_bytes++;
+            if(atomic_load(&simulated_clock_enabled)) advance_clock(18000);
         }
         s->record_bytes=0;
         if(length==0) return -0x7777;
@@ -127,13 +174,13 @@ int mbedtls_ssl_read(mbedtls_ssl_context *s,unsigned char *buffer,size_t length)
     }
     return s->recv(s->context,buffer,length);
 }
-int mbedtls_ssl_write(mbedtls_ssl_context *s,const unsigned char *buffer,size_t length) { if(atomic_load(&tls_mode)==TLS_SLOW_WRITE) { int result=s->send(s->context,buffer,1); sleep_ms(15); return result; } return s->send(s->context,buffer,length); }
+int mbedtls_ssl_write(mbedtls_ssl_context *s,const unsigned char *buffer,size_t length) { if(atomic_load(&tls_mode)==TLS_SLOW_WRITE) { int result=s->send(s->context,buffer,1); advance_clock(15000); return result; } return s->send(s->context,buffer,length); }
 size_t mbedtls_ssl_get_bytes_avail(const mbedtls_ssl_context *s) { (void)s;return 0; }
 uint32_t mbedtls_ssl_get_verify_result(const mbedtls_ssl_context *s) { (void)s;atomic_fetch_add(&verification_checks,1);return (uint32_t)atomic_load(&verification_flags); }
 void mbedtls_ssl_free(mbedtls_ssl_context *s) { (void)s; }
 void mbedtls_ssl_config_free(mbedtls_ssl_config *c) { (void)c; }
 
-typedef struct { int listener; int delay_ms; int drip_ms; int reply_delay_ms; bool handshake; bool read_request; bool single_reply; } server_t;
+typedef struct { int listener; int delay_ms; int drip_ms; int reply_delay_ms; bool handshake; bool read_request; bool single_reply; atomic_bool *reply_ready; } server_t;
 static int listen_loopback(int *port) {
     int fd=socket(AF_INET,SOCK_STREAM,0); assert(fd>=0);
     struct sockaddr_in address={.sin_family=AF_INET,.sin_port=0,.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
@@ -144,6 +191,17 @@ static void *serve(void *argument) {
     server_t *server=argument;int fd=accept(server->listener,NULL,NULL);assert(fd>=0);
     if(server->delay_ms) sleep_ms(server->delay_ms);
     if(server->handshake) (void)send(fd,"H",1,0);
+    if(server->reply_ready) {
+        const char reply[]="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        size_t sent=0;
+        while(sent<sizeof reply-1) {
+            ssize_t count=send(fd,reply+sent,sizeof reply-1-sent,MSG_NOSIGNAL);
+            assert(count>0);
+            sent+=(size_t)count;
+        }
+        atomic_store(server->reply_ready,true);
+        close(fd);return NULL;
+    }
     if(server->single_reply) {
         sleep_ms(server->reply_delay_ms);
         (void)send(fd,"x",1,MSG_NOSIGNAL);
@@ -155,24 +213,57 @@ static void *serve(void *argument) {
 }
 static void wait_tcpip(void) { for(int i=0;i<500 && atomic_load(&tcpip_pending);i++) sleep_ms(1);assert(atomic_load(&tcpip_pending)==0); }
 static void wait_dns(void) { for(int i=0;i<500 && atomic_load(&dns_pending);i++) sleep_ms(1);assert(atomic_load(&dns_pending)==0); }
-static void run_case(const char *name,int port,int total_ms,int connect_ms,int expected_connect,int mode,int server_delay_ms) {
-    (void)server_delay_ms;
+static void wait_reply(atomic_bool *reply_ready) {
+    for(int i=0;i<5000 && !atomic_load(reply_ready);i++) sleep_ms(1);
+    assert(atomic_load(reply_ready));
+}
+static void run_case(const char *name,int port,int total_ms,int connect_ms,int expected_connect,int mode,atomic_bool *reply_ready) {
     atomic_store(&tls_mode,mode);
+    if(mode==TLS_SLOW_HANDSHAKE) {
+        atomic_store(&simulated_handshake_steps,0);
+        simulate_clock();
+    }
     eota_http_deadline_t deadline; assert(eota_http_deadline_init(&deadline,total_ms,total_ms));
     int64_t start=deadline.started_us;
     esp_transport_handle_t transport=eota_http_transport_create(&deadline,connect_ms);assert(transport);
     int connected=transport->connect(transport,name,port,1000);
     assert((connected==0)==expected_connect);
-    if(connected<0 && mode==TLS_SLOW_HANDSHAKE) { int64_t elapsed=(esp_timer_get_time()-start)/1000;assert(elapsed>=65 && elapsed<220); }
+    if(connected<0 && mode==TLS_SLOW_HANDSHAKE) {
+        int64_t elapsed=(esp_timer_get_time()-start)/1000;
+        assert(elapsed==90 && atomic_load(&simulated_handshake_steps)==2);
+        assert(eota_http_deadline_remaining_us(&deadline)>0);
+    }
     if(connected==0) {
-        if(mode==TLS_SLOW_WRITE) { int64_t before=esp_timer_get_time();char request[64];memset(request,'Q',sizeof request);int count=0;while(transport->write(transport,request,sizeof request,1000)>0) count++;assert(count>2);int64_t elapsed=(esp_timer_get_time()-before)/1000;assert(elapsed>=90 && elapsed<total_ms+100); }
-        else if(mode==TLS_NORMAL) {
+        if(mode==TLS_SLOW_WRITE) {
+            /* Isolate the write deadline from connection scheduling, then
+             * advance the same monotonic clock on every slow TLS write. */
+            simulate_clock();
+            assert(eota_http_deadline_init(&deadline,total_ms,total_ms));
+            int64_t before=esp_timer_get_time();char request[64];memset(request,'Q',sizeof request);int count=0;
+            while(transport->write(transport,request,sizeof request,1000)>0) count++;
+            int64_t elapsed=(esp_timer_get_time()-before)/1000;
+            assert(count==11 && elapsed==180);
+            assert(eota_http_deadline_remaining_us(&deadline)==0);
+            restore_clock();
+        }
+        else if(mode==TLS_STEADY_READ) {
+            /* The socket already holds the whole response. Simulated TLS
+             * processing spends 15 ms per byte and reports real recv progress. */
+            assert(reply_ready);
+            wait_reply(reply_ready);
+            simulate_clock();
+            assert(eota_http_deadline_init(&deadline,total_ms,total_ms));
+            int64_t read_started_us=esp_timer_get_time();
             char byte;int reads=0;while(transport->read(transport,&byte,1,1000)>0) reads++;
-            assert(reads>1);int64_t elapsed=(esp_timer_get_time()-start)/1000;assert(elapsed>=130 && elapsed<total_ms+100);
+            int64_t elapsed=(esp_timer_get_time()-read_started_us)/1000;
+            assert(reads==11 && elapsed==180);
+            assert(eota_http_deadline_remaining_us(&deadline)==0);
+            restore_clock();
         }
         transport->close(transport);
     }
     assert(esp_transport_destroy(transport)==ESP_OK);
+    if(mode==TLS_SLOW_HANDSHAKE) restore_clock();
 }
 static void test_read_result_contract(void) {
     int port;
@@ -200,9 +291,12 @@ static void test_absolute_read_deadline(int total_ms,int idle_ms) {
     server.listener=listen_loopback(&port);
     pthread_t thread;assert(pthread_create(&thread,NULL,serve,&server)==0);
     eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline,total_ms,idle_ms));
-    int64_t start=deadline.started_us;
     esp_transport_handle_t transport=eota_http_transport_create(&deadline,100);
     assert(transport && transport->connect(transport,"localhost",port,100)==0);
+    simulate_clock();
+    assert(eota_http_deadline_init(&deadline,total_ms,idle_ms));
+    int64_t start=deadline.started_us;
+    atomic_store(&tls_mode,TLS_RETRY_TIMEOUT);
     char byte;int retries=0,result;
     do {
         result=transport->read(transport,&byte,1,20);
@@ -210,54 +304,66 @@ static void test_absolute_read_deadline(int total_ms,int idle_ms) {
     } while(result==ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT);
     assert(retries>=2 && result==ERR_TCP_TRANSPORT_CONNECTION_FAILED);
     int64_t elapsed_ms=(esp_timer_get_time()-start)/1000;
-    assert(elapsed_ms>=160 && elapsed_ms<1000);
+    assert(elapsed_ms==(total_ms<idle_ms?total_ms:idle_ms));
+    restore_clock();
     assert(esp_transport_destroy(transport)==ESP_OK);
     pthread_join(thread,NULL);close(server.listener);
+    atomic_store(&tls_mode,TLS_NORMAL);
 }
 static void test_single_read_deadline_across_slow_tls_record(void) {
     int port;
-    server_t server={.handshake=true,.drip_ms=18};
+    atomic_bool reply_ready=ATOMIC_VAR_INIT(false);
+    server_t server={.handshake=true,.reply_ready=&reply_ready};
     server.listener=listen_loopback(&port);
     pthread_t thread;assert(pthread_create(&thread,NULL,serve,&server)==0);
     atomic_store(&tls_mode,TLS_SLOW_RECORD);
     eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline,800,400));
     esp_transport_handle_t transport=eota_http_transport_create(&deadline,100);
     assert(transport && transport->connect(transport,"localhost",port,100)==0);
+    wait_reply(&reply_ready);
+    simulate_clock();
+    assert(eota_http_deadline_init(&deadline,800,400));
     char byte=0;
     int64_t started_us=esp_timer_get_time();
     int result=transport->read(transport,&byte,1,65);
     int64_t elapsed_ms=(esp_timer_get_time()-started_us)/1000;
     assert(result==ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT);
-    assert(elapsed_ms>=50 && elapsed_ms<120);
+    assert(elapsed_ms==72);
     int retries=1;
     while((result=transport->read(transport,&byte,1,65))==ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT) {
         retries++;
         assert(retries<12);
     }
-    assert(result==1 && byte=='D' && retries>=2);
+    assert(result==1 && byte=='D' && retries==2);
+    restore_clock();
     assert(esp_transport_destroy(transport)==ESP_OK);
     pthread_join(thread,NULL);close(server.listener);
     atomic_store(&tls_mode,TLS_NORMAL);
 }
 static void test_single_read_deadline_across_tickets(void) {
     int port;
-    server_t server={.handshake=true,.single_reply=true,.reply_delay_ms=60};
+    atomic_bool reply_ready=ATOMIC_VAR_INIT(false);
+    server_t server={.handshake=true,.reply_ready=&reply_ready};
     server.listener=listen_loopback(&port);
     pthread_t thread;assert(pthread_create(&thread,NULL,serve,&server)==0);
     atomic_store(&tls_mode,TLS_NORMAL);
     eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline,800,800));
     esp_transport_handle_t transport=eota_http_transport_create(&deadline,100);
     assert(transport && transport->connect(transport,"localhost",port,100)==0);
+    wait_reply(&reply_ready);
+    simulate_clock();
+    assert(eota_http_deadline_init(&deadline,800,800));
     atomic_store(&tls_mode,TLS_REPEATED_TICKETS);
     char byte=0;
     int64_t started_us=esp_timer_get_time();
     int result=transport->read(transport,&byte,1,25);
     int64_t elapsed_ms=(esp_timer_get_time()-started_us)/1000;
     assert(result==ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT);
-    assert(elapsed_ms>=20 && elapsed_ms<500);
+    assert(elapsed_ms==25);
     assert(eota_http_deadline_remaining_us(&deadline)>0);
     atomic_store(&tls_mode,TLS_NORMAL);
     assert(transport->read(transport,&byte,1,100)==1 && byte=='x');
+    restore_clock();
     assert(esp_transport_destroy(transport)==ESP_OK);
     pthread_join(thread,NULL);close(server.listener);
 }
@@ -293,8 +399,9 @@ int main(void) {
     assert(atomic_load(&verify_required_count)==auth_before+1);
     assert(atomic_load(&bundle_attach_count)==bundle_before+1);
     pthread_join(thread,NULL);close(writer.listener);
-    server_t reader={.handshake=true,.drip_ms=15};reader.listener=listen_loopback(&port);assert(pthread_create(&thread,NULL,serve,&reader)==0);
-    run_case("localhost",port,170,100,1,TLS_NORMAL,0);
+    atomic_bool reply_ready=ATOMIC_VAR_INIT(false);
+    server_t reader={.handshake=true,.reply_ready=&reply_ready};reader.listener=listen_loopback(&port);assert(pthread_create(&thread,NULL,serve,&reader)==0);
+    run_case("localhost",port,170,100,1,TLS_STEADY_READ,&reply_ready);
     pthread_join(thread,NULL);close(reader.listener);
     server_t bad_cert={.handshake=true};bad_cert.listener=listen_loopback(&port);assert(pthread_create(&thread,NULL,serve,&bad_cert)==0);
     atomic_store(&verification_flags,1);int checks_before=atomic_load(&verification_checks);

@@ -134,3 +134,17 @@ ESP32 当前 `otadata` 两扇区全 `0xff`，`ota_0` 是 2017 年 AT 固件，`o
 | mac-work-1 固定 SDK 源码核对与签名样例 | `sdk-lock.json` 核对通过；C3 RSA 镜像 `0x111000` 字节、SHA-256 `b819fce3f59f8d2ad1cc475eb990651035edbc3a786fc1220358dbc12889696c`；ESP32 ECDSA v1 镜像 `0xffff4` 字节、SHA-256 `29f743592abb053262a5bcbbfab8a15d955ce6670f44c8274f2b1f15578af3e0`；官方 `espsecure verify-signature` 均通过，两个 ELF 均含 `eota_validate_image_request` 与 `eota_prepare` | 仓外临时测试键、无效网络占位输入；只编译和本机验签，未刷板 |
 
 mac-work-1 上使用同一源码的 ASan/UBSan CTest 中，`update`、`update_esp32`、`http_deadline`、`confirmation` 和真实 mbedTLS `real_https` 为 5/6 通过；未修改的 `http_transport` 在时间／慢写计数断言处波动。随后无 sanitizer 重跑又在 `http_transport` 和 `real_https` 墙钟断言处失败，而 mac-ci-1 对真实 transport 源码的 ASan/UBSan 直接测试通过。这些结果不能表述为完整 host CTest 通过，也不能证明真实设备 HTTPS、Flash、断电和 bootloader 链路；P5-04 与设备验收仍未完成。
+
+## P6 host 传输测试时钟与 HTTPS 总期限用例（2026-09-27）
+
+针对上一检查点的 `http_transport` 失败，在负载较高的 mac-work-1 上连续运行旧测试 20 次，20 次均因慢握手墙钟区间或慢写成功次数断言失败。旧测试从连接前起算 170 毫秒总期限，却要求连接后至少完成三次慢写；连接本身受宿主调度影响，因而不能用这些断言判断传输实现是否越过期限。本次仅调整测试：慢握手、慢写、持续读取、绝对读期限、跨调用 TLS 记录及连续 TLS 1.3 ticket 以可控单调时钟推进；读取仍从真实本地 socket 接收预先送达的字节，断言包括期限到达前成功次数、到达时的失败返回，以及单次读取超时后的续读。修正后的同一 mac-work-1 测试连续 12 次通过。生产 `http_transport.c`、SDK 锁与 OTA API 均未修改。
+
+真实 mbedTLS 回环中的 HTTP trickle 用例要验证 450 毫秒总期限，却把无进展期限设置为 180 毫秒；mac-work-1 单独复跑三次出现两次通过、一次因约 225 毫秒的 idle 截止而早于总期限失败。现把该用例的 idle 期限设为同一 450 毫秒，确保它检验的是总期限；较短 idle 期限仍由上述直接编译生产传输源码的假件回归独立检验。慢握手用例还在高负载下于内部计时恰好 400 毫秒触及旧 `<400` 墙钟断言；服务端保持握手停顿 1 秒、客户端仍须在 600 毫秒内先行失败，精确连接期限继续由可控时钟测试验证。真实 TLS、HTTP 请求与响应、CA、主机名、SNI 和负例均保持原样。
+
+| 验证 | 结果 | 边界 |
+| --- | --- | --- |
+| mac-work-1 固定 SDK mbedTLS 4.1 原生回环完整 CTest | 非 sanitizer 配置连续三轮均为 6/6 通过 | 本机回环；不是设备网络栈 |
+| mac-work-1 AppleClang ASan/UBSan 完整 CTest | 6/6 通过 | host 假件与本机真实 mbedTLS；不含实体 Flash/bootloader |
+| mac-ci-1 AppleClang 严格 ASan/UBSan 直接编译真实传输源码 | `http_transport` 通过；启用 `-fno-sanitize-recover=all` | 独立宿主复核；未写设备 |
+
+以上只修正 host 测试对宿主线程调度的假设，不改变产品超时配置或生产传输行为。P5-04 和双板实测仍未验收。

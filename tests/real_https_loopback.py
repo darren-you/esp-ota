@@ -81,7 +81,7 @@ class LoopbackServer:
             with connection:
                 connection.settimeout(2)
                 if self.mode == "slow_handshake":
-                    time.sleep(0.7)
+                    time.sleep(1.0)
                     return
                 with self.context.wrap_socket(connection, server_side=True) as tls:
                     request = bytearray()
@@ -134,7 +134,10 @@ def case(name: str, client: str, certificate: pathlib.Path, key: pathlib.Path,
         assert server.request_received, f"{name}: HTTP request missing"
     if server_mode in ("slow_handshake", "trickle"):
         assert client_ms >= total_ms * 0.75, f"{name}: failed before deadline ({client_ms}ms)"
-        assert client_ms < total_ms + 150, f"{name}: deadline exceeded by {client_ms}ms"
+        # The native TLS case uses wall time. Allow host scheduling jitter, but
+        # require the client to stop before the peer's one-second hold ends.
+        overhead_ms = 350 if server_mode == "slow_handshake" else 150
+        assert client_ms < total_ms + overhead_ms, f"{name}: deadline exceeded by {client_ms}ms"
     if server_mode == "trickle":
         assert server.request_received, f"{name}: HTTP request missing"
     print(f"{name}: {actual}; wall={elapsed_ms:.0f}ms; SNI={server.sni}")
@@ -154,8 +157,11 @@ def main() -> None:
              2000, 1000, "failure connect", "wrong.local")
         case("slow handshake", client, leaf, leaf_key, ca, "localhost", "slow_handshake",
              250, 250, "failure connect", None)
+        # This case tests the total deadline under continued response progress.
+        # Keep the idle deadline no shorter than the total deadline so host
+        # scheduling gaps cannot turn it into a different timeout case.
         case("HTTP trickle", client, leaf, leaf_key, ca, "localhost", "trickle",
-             450, 180, "failure read", "localhost")
+             450, 450, "failure read", "localhost")
 
 
 if __name__ == "__main__":
