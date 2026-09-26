@@ -6,7 +6,7 @@
 
 ```mermaid
 flowchart LR
-    input["仓外 lab_inputs.h：Wi-Fi、SNTP、URL 与摘要"] --> main["main/main.c：实验调用方"]
+    input["仓外 lab_inputs.h：Wi-Fi、SNTP、URL 与摘要"] --> main["examples/common/main.c：实验调用方"]
     main --> wifi["IDF Wi-Fi / SNTP：网络与可信时间"]
     main --> ota["同仓 components/esp_ota：prepare / select / confirm"]
     ota --> flash["IDF app_update：当前双应用槽"]

@@ -1,4 +1,4 @@
-# ESP OTA 开发检查点（2026-09-23）
+# ESP OTA 开发检查点
 
 本轮建立 `components/esp_ota` 独立组件与 C3 样例，迁入 Base 通用 OTA 机制并拆为 `preflight → prepare → select`。`prepare` 不切启动槽；`select` 重验实际槽、完整 signed bin 摘要与 SDK 签名。`eota_observe_slots` 向 Base 收据层提供只读实际槽及镜像状态。Base 业务收据、自检与授权没有搬入本仓。来源文件已对应 Base 公开提交 `10cb8514e8f7a3a55b8ec4622cce4f98a0f90eea`，见[来源记录](../design/source-provenance.md)。
 
@@ -105,3 +105,20 @@ AppleClang ASan/UBSan host CTest 4/4 通过。锁定公开 ESP-IDF fork `855937c
 | 仓外临时 RSA-3072 测试键、无效网络占位输入的签名 C3 样例 | `0x111000` 字节，SHA-256 `9c95b690d0265507cb03f7c4b994f7a54952d5700793ce90af3f4d16a63da0a3`；`espsecure verify-signature --version 2 --keyfile` 验签成功，ELF／map 确认 `eota_prepare`、`transport_read`、官方 HTTP 读取和 `esp_ota_begin` 均已链接 | 只编译与本机验签；没有执行镜像、刷板或使用生产凭据 |
 
 复验还发现样例的实验输入若恰放在构建目录根的 `lab_inputs.h`，多轮 CMake 配置会将它覆盖为默认空输入，导致表面上签名构建成功、实际 OTA 准备代码未进入 ELF。现在顶层 CMake 在配置前拒绝构建目录内输入；故障复现用例验证拒绝时原输入 SHA-256 不变，构建目录外的占位输入仍可完成签名构建。历史检查点的 SHA 均保留其当次验证事实。本次没有设备 HTTPS、Flash、切槽或回滚运行证据，P5-04 继续未验收。
+
+## C3 与 ESP32 双目标离线验证（2026-09-26）
+
+固定 SDK `578cf89c343e388db43ba1f4ddcd602fedcb763c` 与 lwIP `2758df4cd3666b3b2a5b53830148379326425c0d` 通过 `check_sdk.py`。ESP32 的官方 chip ID 是 `0x0000`，旧 policy 检查会误拒；现在只拒绝 SDK 的 `ESP_CHIP_ID_INVALID` (`0xffff`)。同一真实 `update.c` 故障矩阵分别以 C3 `0x0005`、ESP32 `0x0000` 编译并运行，AppleClang ASan/UBSan host CTest **5/5** 通过。仓外错配配置的独立编译探针也确认 C3/ECDSA、ESP32/RSA 均令 `eota_available=false`。这组 host 测试未启用真实 mbedTLS HTTPS 回环。
+
+首次 ESP32 签名装配暴露旧组件只接受 RSA 宏；固定 SDK 的 ESP32 默认签名应用配置实际选用 ECDSA v1，拿 C3 的 RSA-3072 测试键签 ESP32 分区表时被拒绝。组件现按 C3/RSA-3072 与 ESP32/ECDSA v1 分别检查目标签名配置，保持 `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`、证书 bundle、自定义 HTTPS transport、rollback 及 anti-rollback 禁用条件。固定 SDK 的 `esp_image_verify(ESP_IMAGE_VERIFY)` 在 ECDSA v1 下使用 bootloader 内嵌公钥验证签名，并将签名块计入 `metadata.image_len`；组件继续按此完整长度做摘要身份检查。host 假件不能代替设备端的这个 SDK 验证调用。
+
+| 离线验证 | 镜像字节数 | SHA-256 | 装配检查 |
+| --- | ---: | --- | --- |
+| C3 默认未武装 | 164240 (`0x28190`) | `c15094bf548c1931fe9da974a4d714a9cb90f0deb61c77c41b2a718a1999f85a` | `CONFIG_IDF_TARGET="esp32c3"`；通用源码在 `examples/common/main.c` |
+| ESP32 默认未武装 | 156848 (`0x264b0`) | `b46331e8ac3820b6c3bf7cb1cf654ded2df03e011cbd459e1f95851ff449d8bd` | `CONFIG_IDF_TARGET="esp32"`；默认官方通用双 OTA 表只用于编译 |
+| C3 仓外临时 RSA-3072 测试键签名 | 1118208 (`0x111000`) | `e2472beac900288fa325056edec185e84e9e1c7a03d2186d159641ca92de6598` | `espsecure verify-signature --version 2 --keyfile` 通过；RSA、signed update、custom transport 已启用 |
+| ESP32 仓外临时 ECDSA P-256 测试键签名 | 1048564 (`0xffff4`) | `2ea7094b3b310f65ff89a56496fd06beaed81ce7a1fe46d88f9ce555b5e297d4` | `espsecure verify-signature --version 1 --keyfile` 通过；ECDSA v1、signed update、custom transport 已启用；ELF 包含 `eota_prepare`、`eota_select` |
+
+签名构建只使用仓外测试键、无效网络占位输入以及独立 build/sdkconfig。C3 使用已确认的现有 C3 样例分区；ESP32 的仓外 CSV 依据两份逐字节一致的 4 MiB Flash 只读备份：分区表位于 `0x8000`，`phy_init@0xf000/0x1000`、`otadata@0x10000/0x2000`、`nvs@0x12000/0xe000`、`at_customize` type `0x40`/subtype `0x00` `@0x20000/0xe0000`、`ota_0@0x100000/0x180000`、`ota_1@0x280000/0x180000`。固定 SDK 的官方分区解析器读回生成表与上述几何一致。该表只作为当前旧板的**离线编译输入**，不代表新 Container 目标布局。
+
+ESP32 当前 `otadata` 两扇区全 `0xff`，`ota_0` 是 2017 年 AT 固件，`ota_1` 全 `0xff`；它没有与本次临时 ECDSA 测试键匹配的签名运行与回退基线。离线签名、编译、镜像摘要和 host 假件不能证明现有 bootloader 可启动本次镜像，也不证明 OTA 下载、Flash 写入、运行时验签、确认或回滚。没有连接或写入两台设备，没有烧 eFuse、改生产密钥或替换分区。P5-04 至 P5-06 及 Base/Container 接入的设备验收仍待按五仓主计划执行。

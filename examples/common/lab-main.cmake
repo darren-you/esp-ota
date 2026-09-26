@@ -1,0 +1,17 @@
+if(EOTA_LAB_ARMED)
+    if(NOT EOTA_LAB_INPUTS OR NOT IS_ABSOLUTE "${EOTA_LAB_INPUTS}" OR NOT EXISTS "${EOTA_LAB_INPUTS}")
+        message(FATAL_ERROR "EOTA_LAB_ARMED requires an absolute EOTA_LAB_INPUTS header outside this repository")
+    endif()
+    configure_file("${EOTA_LAB_INPUTS}" "${CMAKE_CURRENT_BINARY_DIR}/lab_inputs.h" COPYONLY)
+else()
+    configure_file("${EOTA_LAB_SAMPLE_DIR}/lab_inputs_example.h"
+        "${CMAKE_CURRENT_BINARY_DIR}/lab_inputs.h" COPYONLY)
+endif()
+idf_component_register(SRCS "${CMAKE_CURRENT_LIST_DIR}/main.c"
+    INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}"
+    REQUIRES esp_ota esp_wifi esp_netif esp_event nvs_flash esp_timer esp_system)
+if(EOTA_LAB_ARMED)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE EOTA_LAB_ARMED=1)
+else()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE EOTA_LAB_ARMED=0)
+endif()

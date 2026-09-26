@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "eota.h"
 #include "lab_inputs.h"
+#include "sdkconfig.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -20,6 +21,22 @@
 
 #define LAB_CONNECTED BIT0
 #define LAB_FAILED BIT1
+
+#if CONFIG_IDF_TARGET_ESP32C3
+#define EOTA_LAB_OTA_0_ADDRESS_BYTES 0x20000U
+#define EOTA_LAB_OTA_1_ADDRESS_BYTES 0x200000U
+#define EOTA_LAB_OTA_SIZE_BYTES 0x1e0000U
+#elif CONFIG_IDF_TARGET_ESP32
+#if EOTA_LAB_ARMED && !CONFIG_PARTITION_TABLE_CUSTOM
+#error "ESP32 armed OTA requires the separately verified custom partition table"
+#endif
+#if EOTA_LAB_ARMED && (EOTA_LAB_OTA_0_ADDRESS_BYTES == 0 || \
+                       EOTA_LAB_OTA_1_ADDRESS_BYTES == 0 || EOTA_LAB_OTA_SIZE_BYTES == 0)
+#error "ESP32 armed OTA requires the observed two OTA addresses and size"
+#endif
+#else
+#error "This lab only supports esp32c3 and esp32"
+#endif
 
 static const char *TAG = "eota_lab";
 static EventGroupHandle_t wifi_events;
@@ -140,10 +157,10 @@ void app_main(void)
     }
     const eota_policy_t policy = {
         .project_name = "esp_ota_lab",
-        .chip_id = 0x0005, /* ESP32-C3 */
-        .ota_0_address_bytes = 0x20000,
-        .ota_1_address_bytes = 0x200000,
-        .ota_size_bytes = 0x1e0000,
+        .chip_id = CONFIG_IDF_FIRMWARE_CHIP_ID,
+        .ota_0_address_bytes = EOTA_LAB_OTA_0_ADDRESS_BYTES,
+        .ota_1_address_bytes = EOTA_LAB_OTA_1_ADDRESS_BYTES,
+        .ota_size_bytes = EOTA_LAB_OTA_SIZE_BYTES,
         .connect_timeout_ms = 5000,
         .read_timeout_ms = 1000,
         .idle_timeout_ms = 30000,
