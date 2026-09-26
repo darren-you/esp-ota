@@ -98,6 +98,10 @@ eota_result_t eota_observe_slots(const eota_policy_t *policy, eota_slots_t *slot
  * operation receipt. prepare repeats the check before the first Flash write. */
 eota_result_t eota_preflight(const eota_policy_t *policy, uint32_t image_size_bytes,
                              eota_slots_t *slots);
+/* Check request fields that require no policy, slot, network or Flash access.
+ * Call this before retiring an old inactive image; preflight and prepare still
+ * perform their own live checks. */
+eota_result_t eota_validate_image_request(const eota_image_t *image);
 /* Destructively retire the inactive app after the caller has durably recorded
  * the authorized operation and serialized all app/otadata writers. The exact
  * signed running image must match expected_running_sha256, be selected and

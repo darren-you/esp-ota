@@ -122,3 +122,15 @@ AppleClang ASan/UBSan host CTest 4/4 通过。锁定公开 ESP-IDF fork `855937c
 签名构建只使用仓外测试键、无效网络占位输入以及独立 build/sdkconfig。C3 使用已确认的现有 C3 样例分区；ESP32 的仓外 CSV 依据两份逐字节一致的 4 MiB Flash 只读备份：分区表位于 `0x8000`，`phy_init@0xf000/0x1000`、`otadata@0x10000/0x2000`、`nvs@0x12000/0xe000`、`at_customize` type `0x40`/subtype `0x00` `@0x20000/0xe0000`、`ota_0@0x100000/0x180000`、`ota_1@0x280000/0x180000`。固定 SDK 的官方分区解析器读回生成表与上述几何一致。该表只作为当前旧板的**离线编译输入**，不代表新 Container 目标布局。
 
 ESP32 当前 `otadata` 两扇区全 `0xff`，`ota_0` 是 2017 年 AT 固件，`ota_1` 全 `0xff`；它没有与本次临时 ECDSA 测试键匹配的签名运行与回退基线。离线签名、编译、镜像摘要和 host 假件不能证明现有 bootloader 可启动本次镜像，也不证明 OTA 下载、Flash 写入、运行时验签、确认或回滚。没有连接或写入两台设备，没有烧 eFuse、改生产密钥或替换分区。P5-04 至 P5-06 及 Base/Container 接入的设备验收仍待按五仓主计划执行。
+
+## P6 首次擦除前的 OTA 请求静态校验（2026-09-27）
+
+联合 Container 升级会在 `eota_prepare` 下载前先退役旧备用应用槽。原 `eota_preflight(policy, size, slots)` 只检查槽状态和容量，1 字节请求也可通过；原 `eota_prepare` 到后续阶段才按镜像头最小长度拒绝它。现在公开 `eota_validate_image_request(image)`，只检查原有 HTTPS URL 规则和 `esp_image_header_t + esp_image_segment_header_t + esp_app_desc_t` 的最小长度，不碰 policy、网络、Flash 或槽。调用方须在第一次退役旧镜像前调用；`eota_prepare` 也调用同一入口。授权、槽容量、摘要和实际签名镜像仍分别由调用方、preflight 与准备/选择阶段核对。
+
+| 验证 | 结果 | 边界 |
+| --- | --- | --- |
+| mac-ci-1 AppleClang ASan/UBSan 直接编译真实 `update.c` | C3 RSA 与 ESP32 ECDSA 两组更新故障测试均通过；静态请求正反例涵盖 1 字节、最小镜像头长度、无效 URL 与 512 字节上限 | host SDK 假件；未读写设备 |
+| mac-ci-1 AppleClang ASan/UBSan 直接编译真实 `http_transport.c` | DNS、TCP、TLS 与读写期限测试通过；未签名配置下静态入口返回 `UNSUPPORTED` 的编译探针通过 | transport 本轮未修改；host socket 与假 TLS |
+| mac-work-1 固定 SDK 源码核对与签名样例 | `sdk-lock.json` 核对通过；C3 RSA 镜像 `0x111000` 字节、SHA-256 `b819fce3f59f8d2ad1cc475eb990651035edbc3a786fc1220358dbc12889696c`；ESP32 ECDSA v1 镜像 `0xffff4` 字节、SHA-256 `29f743592abb053262a5bcbbfab8a15d955ce6670f44c8274f2b1f15578af3e0`；官方 `espsecure verify-signature` 均通过，两个 ELF 均含 `eota_validate_image_request` 与 `eota_prepare` | 仓外临时测试键、无效网络占位输入；只编译和本机验签，未刷板 |
+
+mac-work-1 上使用同一源码的 ASan/UBSan CTest 中，`update`、`update_esp32`、`http_deadline`、`confirmation` 和真实 mbedTLS `real_https` 为 5/6 通过；未修改的 `http_transport` 在时间／慢写计数断言处波动。随后无 sanitizer 重跑又在 `http_transport` 和 `real_https` 墙钟断言处失败，而 mac-ci-1 对真实 transport 源码的 ASan/UBSan 直接测试通过。这些结果不能表述为完整 host CTest 通过，也不能证明真实设备 HTTPS、Flash、断电和 bootloader 链路；P5-04 与设备验收仍未完成。

@@ -7,6 +7,7 @@
 ```mermaid
 flowchart LR
     app["调用方 Base 或独立双目标样例：授权、收据、自检"] --> api["components/esp_ota/include/eota.h：机制接口"]
+    api --> request["validate_image_request：HTTPS URL 与镜像最小长度"]
     api --> preflight["preflight：运行槽、目标槽与产品约束"]
     api --> identity["verified image：验签与完整镜像摘要"]
     api --> prepare["prepare：HTTPS、镜像头、写槽、整镜像摘要与签名"]
@@ -28,6 +29,8 @@ flowchart LR
 ```
 
 准备阶段用 IDF 写 inactive 应用槽并验证完整 signed bin，**不切启动槽**；`esp_ota_begin` 可能清除该槽原有的 otadata 记录。与 Container 联合升级时，调用方先持久登记并读回 OTA 收据，再用 `eota_retire_inactive` 在写新固件前精确退役旧备用镜像，经签名/otadata 读回证明后才退役旧 Container 绑定；中途断电由调用方按原收据重入对账。应用可在两阶段之间持久提交与业务包的绑定；`eota_select` 再核对实际槽、摘要、当前可信产品约束与 IDF 签名，并显式切槽。切槽失败时库恢复旧运行槽的 VALID 状态并清除未启动候选的 NEW 状态，读回不确定则明确报错。库不创建 worker、不写业务 NVS、不管理 Wasm 包，也不替应用决定何时确认新固件。具体调用合同见 [API 说明](docs/design/api-contract.md)。
+
+旧备用镜像首次擦除前，调用方还须用 `eota_validate_image_request` 静态检查新请求的 HTTPS URL 和最小镜像头长度。`eota_prepare` 复用这一检查；槽预检仍单独核对可信 policy、实际状态和分区容量。
 
 ## 独立构建
 

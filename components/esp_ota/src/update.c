@@ -260,6 +260,20 @@ bool eota_available(void)
     return EOTA_SIGNED_ENABLED;
 }
 
+eota_result_t eota_validate_image_request(const eota_image_t *image)
+{
+#if !EOTA_SIGNED_ENABLED
+    (void)image;
+    return EOTA_UPDATE_UNSUPPORTED;
+#else
+    if (image == NULL || !valid_url(image->image_url) ||
+        image->image_size_bytes < EOTA_PREFIX_BYTES) {
+        return EOTA_UPDATE_INVALID_REQUEST;
+    }
+    return EOTA_UPDATE_OK;
+#endif
+}
+
 const char *eota_error(eota_result_t result)
 {
     switch (result) {
@@ -411,9 +425,12 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     (void)policy; (void)image; (void)progress; (void)context; (void)prepared;
     return EOTA_UPDATE_UNSUPPORTED;
 #else
-    if (!valid_policy(policy) || !policy->trusted_time || image == NULL || prepared == NULL ||
-        !valid_url(image->image_url)) return EOTA_UPDATE_INVALID_REQUEST;
+    if (!valid_policy(policy) || !policy->trusted_time || image == NULL || prepared == NULL) {
+        return EOTA_UPDATE_INVALID_REQUEST;
+    }
     memset(prepared, 0, sizeof *prepared);
+    const eota_result_t request_result = eota_validate_image_request(image);
+    if (request_result != EOTA_UPDATE_OK) return request_result;
     eota_http_deadline_t deadline = {0};
     if (!eota_http_deadline_init(&deadline, policy->total_timeout_ms,
                                  policy->idle_timeout_ms)) return EOTA_UPDATE_RESOURCE_FAILURE;
@@ -422,8 +439,6 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     eota_result_t result = inspect_slots(policy, image->image_size_bytes, &slots, NULL, &target);
     if (eota_http_deadline_remaining_us(&deadline) <= 0) return EOTA_UPDATE_DOWNLOAD_FAILED;
     if (result != EOTA_UPDATE_OK) return result;
-    if (image->image_size_bytes < EOTA_PREFIX_BYTES) return EOTA_UPDATE_INVALID_REQUEST;
-
     esp_ota_handle_t handle = 0;
     bool ota_started = false;
     esp_transport_handle_t transport = NULL;

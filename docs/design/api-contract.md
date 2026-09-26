@@ -2,6 +2,8 @@
 
 `eota_` 是第一方机制 API；`esp_ota_*` 仍属于 ESP-IDF。库不消费网络命令中的 target 作为信任来源，产品约束必须由受控应用装配。`eota_policy_t` 指定非空项目名、芯片 ID、两个 OTA 槽的地址与共同大小、下载期限及已建立可信时间的事实。应用先用 `eota_available` 拒绝普通未签名构建。本组件在 IDF 目标上编译拒绝 `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK`，避免 SDK 的 pending 确认入口写 eFuse。
 
+调用方在首次退役旧备用镜像前必须调用 `eota_validate_image_request(image)`。它只按与 `eota_prepare` 相同的规则检查 HTTPS URL 和至少容纳 IDF 镜像头、首段头及应用描述的请求长度；不读取 policy、槽、网络或 Flash，不验证授权、SHA、签名或实际镜像内容。普通未签名构建返回 `EOTA_UPDATE_UNSUPPORTED`。此静态检查成功后，调用方仍须执行槽预检、持久收据和实际镜像状态对账。
+
 1. 应用核对请求授权、当前业务状态、网络与可信时间；用 `eota_preflight(policy, size, slots)` 核对可写安全条件并取得真实运行/目标槽、大小和状态。`eota_observe_slots` 是只读事实接口，即使 boot selector 与运行槽不一致也报告实际槽和镜像状态，供跨启动结果查询。应用在首次目标槽写入前持久提交操作收据并精确读回。
    联合 Container 固件切换还需先完成旧备用固件退役：应用在同一个存储 owner 下，以已读回的持久收据和当前 ECS2 绑定授权 `eota_retire_inactive`，传入精确目标 subtype 与已确认运行镜像 SHA。库核对当前运行/选中槽 VALID、运行镜像产品约束与完整签名摘要，确保目标首个扇区已擦除并读回 `0xff` 镜像魔数，再尝试使备用 otadata 失效；只有重新观察到目标镜像验签无效、目标 otadata 不处于可启动状态且运行镜像仍精确匹配时才返回成功。应用随后才可把 Container 中已证明不可启动的旧备用绑定退役，并执行 `eota_prepare`。任一失败或重启必须依据原收据和实际镜像/otadata/ECS2 状态继续对账，不能把本 API 的一次失败当成未写入。仅凭 app 侧签名校验失败不能证明 bootloader 不会回退装载；物理镜像魔数读回是独立必要条件。
 2. 应用在唯一专用 worker 调用 `eota_prepare`。URL 只接受 HTTPS；HTTP 必须是 200、确定且一致的 Content-Length、非 chunked、不重定向。镜像头项目、芯片和 SDK 有效性核对后才调用 `esp_ota_begin`。完整 signed bin 写入后从目标槽读回，核对 SHA-256，再由 `esp_ota_end` 验签。返回 `eota_prepared_t` 时 boot selector 仍指向原槽；固定 IDF 的 `esp_ota_begin` 会尝试使 inactive 槽原有的 otadata 记录失效，准备阶段并非 otadata 全程不变。

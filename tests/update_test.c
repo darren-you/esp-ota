@@ -120,6 +120,57 @@ static void digest(eota_image_t *request)
     for (size_t i = 0; i < sizeof request->sha256; ++i) request->sha256[i] = (uint8_t)(sum + i);
 }
 
+static void progress(uint32_t received, uint32_t total, void *context);
+
+static void test_image_request_validation(void)
+{
+    eota_image_t request = {
+        .image_url = "https://example.test/esp-base.bin",
+        .image_size_bytes = IMAGE_BYTES,
+    };
+    eota_slots_t slots;
+    eota_prepared_t prepared;
+    reset(); digest(&request);
+    /* Slot preflight only knows the size; the static request gate must run
+     * before a caller retires the old inactive app. */
+    assert(eota_preflight(&policy, 1, &slots) == EOTA_UPDATE_OK);
+    assert(eota_validate_image_request(&request) == EOTA_UPDATE_OK);
+    assert(eota_validate_image_request(NULL) == EOTA_UPDATE_INVALID_REQUEST);
+    request.image_size_bytes = PREFIX_BYTES;
+    assert(eota_validate_image_request(&request) == EOTA_UPDATE_OK);
+    request.image_size_bytes = PREFIX_BYTES - 1;
+    assert(eota_validate_image_request(&request) == EOTA_UPDATE_INVALID_REQUEST);
+    memset(&prepared, 0xa5, sizeof prepared);
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) ==
+           EOTA_UPDATE_INVALID_REQUEST);
+    assert(prepared.image_size_bytes == 0 && init_calls == 0 && begin_calls == 0 &&
+           erase_calls == 0);
+    request.image_size_bytes = IMAGE_BYTES;
+
+    const char *invalid_urls[] = {
+        NULL, "http://example.test/image.bin", "https://", "https://?query",
+        "https://user@example.test/image.bin", "https://example.test/image.bin#fragment",
+        "https://example.test/a b",
+    };
+    for (size_t i = 0; i < sizeof invalid_urls / sizeof invalid_urls[0]; ++i) {
+        request.image_url = invalid_urls[i];
+        assert(eota_validate_image_request(&request) == EOTA_UPDATE_INVALID_REQUEST);
+        assert(eota_prepare(&policy, &request, progress, NULL, &prepared) ==
+               EOTA_UPDATE_INVALID_REQUEST);
+        assert(init_calls == 0 && begin_calls == 0 && erase_calls == 0);
+    }
+    char boundary_url[EOTA_URL_BYTES + 2];
+    memset(boundary_url, 'a', sizeof boundary_url);
+    memcpy(boundary_url, "https://", 8);
+    boundary_url[EOTA_URL_BYTES] = '\0';
+    request.image_url = boundary_url;
+    assert(eota_validate_image_request(&request) == EOTA_UPDATE_OK);
+    boundary_url[EOTA_URL_BYTES] = 'a';
+    boundary_url[EOTA_URL_BYTES + 1] = '\0';
+    assert(eota_validate_image_request(&request) == EOTA_UPDATE_INVALID_REQUEST);
+    assert(init_calls == 0 && begin_calls == 0 && erase_calls == 0);
+}
+
 int64_t esp_timer_get_time(void) { return now_us; }
 int esp_crt_bundle_attach(void *config) { (void)config; return 0; }
 const esp_partition_t *esp_ota_get_running_partition(void)
@@ -472,6 +523,7 @@ int main(void)
 {
     eota_image_t request = {.image_url = "https://example.test/esp-base.bin", .image_size_bytes = IMAGE_BYTES};
     assert(eota_available());
+    test_image_request_validation();
     test_retire_inactive();
     reset(); digest(&request);
     eota_slots_t slots;
