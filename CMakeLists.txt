@@ -40,6 +40,7 @@ if(BUILD_TESTING)
     target_compile_options(eota_http_transport_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
     target_link_libraries(eota_http_transport_test PRIVATE Threads::Threads)
     add_test(NAME http_transport COMMAND eota_http_transport_test)
+    set_tests_properties(http_transport PROPERTIES TIMEOUT 10)
 
     if(EOTA_REAL_HTTPS_TEST)
         add_subdirectory(tests/native-tls)

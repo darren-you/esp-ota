@@ -48,3 +48,4 @@ endif()
 add_test(NAME real_https COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_SOURCE_DIR}/tests/real_https_loopback.py"
     "$<TARGET_FILE:eota_real_https_client>" "${EOTA_OPENSSL_EXECUTABLE}")
+set_tests_properties(real_https PROPERTIES TIMEOUT 10)

@@ -64,6 +64,7 @@ class LoopbackServer:
         self.sni = None
         self.request_received = False
         self.errors = []
+        self.closed_at = None
         self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.context.minimum_version = tls_version
         self.context.maximum_version = tls_version
@@ -103,6 +104,7 @@ class LoopbackServer:
         except Exception as error:  # Surface any unexpected server failure.
             self.errors.append(error)
         finally:
+            self.closed_at = time.monotonic()
             self.listener.close()
 
     def join(self):
@@ -120,7 +122,8 @@ def case(name: str, client: str, certificate: pathlib.Path, key: pathlib.Path,
     result = subprocess.run([client, hostname, str(server.port), str(ca),
                              str(total_ms), str(idle_ms)],
                             capture_output=True, text=True, timeout=3)
-    elapsed_ms = (time.monotonic() - started) * 1000
+    client_finished_at = time.monotonic()
+    elapsed_ms = (client_finished_at - started) * 1000
     server.join()
     actual = result.stdout.strip()
     assert actual.startswith(expected), (
@@ -133,8 +136,10 @@ def case(name: str, client: str, certificate: pathlib.Path, key: pathlib.Path,
     if expected == "success read":
         assert server.request_received, f"{name}: HTTP request missing"
     if server_mode in ("slow_handshake", "trickle"):
-        assert client_ms >= total_ms * 0.75, f"{name}: failed before deadline ({client_ms}ms)"
-        assert client_ms < total_ms + 150, f"{name}: deadline exceeded by {client_ms}ms"
+        assert client_ms >= total_ms, f"{name}: failed before deadline ({client_ms}ms)"
+    if server_mode == "slow_handshake":
+        assert server.closed_at is not None and client_finished_at < server.closed_at, (
+            f"{name}: client waited for the server to close")
     if server_mode == "trickle":
         assert server.request_received, f"{name}: HTTP request missing"
     print(f"{name}: {actual}; wall={elapsed_ms:.0f}ms; SNI={server.sni}")
@@ -155,7 +160,7 @@ def main() -> None:
         case("slow handshake", client, leaf, leaf_key, ca, "localhost", "slow_handshake",
              250, 250, "failure connect", None)
         case("HTTP trickle", client, leaf, leaf_key, ca, "localhost", "trickle",
-             450, 180, "failure read", "localhost")
+             450, 450, "failure read", "localhost")
 
 
 if __name__ == "__main__":

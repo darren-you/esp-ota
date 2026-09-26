@@ -127,4 +127,12 @@ ESP32 当前 `otadata` 两扇区全 `0xff`，`ota_0` 是 2017 年 AT 固件，`o
 
 审查发现 `eota_prepare` 对无效 URL 或尚未建立可信时间的请求会在清零 `prepared` 之前返回。若调用方复用上一次成功准备的输出对象，这次失败会留下旧收据；旧源码在“先成功准备，再提交 HTTP URL”回归中确定性违反收据清零断言。现于函数入口清零非空输出，包括未启用签名 OTA 的分支；失败请求之后的 `eota_select` 因无有效收据而拒绝切槽。调用方仍必须检查返回值，不能把清零当作授权或并发保护。
 
-本机 AppleClang ASan/UBSan 直接编译同一份 `update.c` 故障矩阵，C3 `chip_id=5` 与 ESP32 `chip_id=0` 均通过；本机独立 `http_transport` ASan/UBSan 测试通过。`mac-work-1` 的固定 IDF `578cf89c343e388db43ba1f4ddcd602fedcb763c` 下，两目标默认未武装样例构建通过，镜像分别为 C3 `0x28190`、ESP32 `0x264b0` 字节；它们不运行签名升级。该机启用真实 mbedTLS 回环的 CTest 共 6 项，其中 `update`、`update_esp32`、`http_deadline`、`confirmation` 通过；`http_transport` 和 `real_https` 的毫秒级时序断言未通过，普通与 ASan/UBSan 构建均复现。后两项只编译传输/期限源码，不包含本次修改的 `update.c`，本轮不能声称完整 host suite 通过，也不把时序失败归因为已证实的宿主负载。没有设备 HTTPS、Flash 或 bootloader 验证；P5 各项验收状态不变。
+本机 AppleClang ASan/UBSan 直接编译同一份 `update.c` 故障矩阵，C3 `chip_id=5` 与 ESP32 `chip_id=0` 均通过；本机独立 `http_transport` ASan/UBSan 测试通过。`mac-work-1` 的固定 IDF `578cf89c343e388db43ba1f4ddcd602fedcb763c` 下，两目标默认未武装样例构建通过，镜像分别为 C3 `0x28190`、ESP32 `0x264b0` 字节；它们不运行签名升级。该机启用真实 mbedTLS 回环的初轮 CTest 共 6 项，其中 `update`、`update_esp32`、`http_deadline`、`confirmation` 通过；`http_transport` 和 `real_https` 的毫秒级时序断言未通过，普通与 ASan/UBSan 构建均复现。后两项只编译传输/期限源码，不包含本次修改的 `update.c`；初轮不能声称完整 host suite 通过，后续调查和修正见下节。没有设备 HTTPS、Flash 或 bootloader 验证；P5 各项验收状态不变。
+
+## 主机时序测试与真实期限对照（2026-09-26）
+
+在相同固定 SDK 下，父提交 `5da4a0d` 和收据修复提交 `2072731` 的普通与 ASan/UBSan 构建均复现上述两项失败。父提交仓外诊断版记录：慢写假件一次计划 15 毫秒的 `nanosleep` 实耗 192 毫秒，超过原 170 毫秒总期限；真实 HTTPS 测试服务计划每 60 毫秒发送一字节，实际相邻发送间隔曾为 110、171、195 毫秒，超过原 180 毫秒空闲期限。另一次真实 HTTPS 客户端在总期限 450 毫秒、空闲期限 180 毫秒时于 497 毫秒失败，读回单调时钟显示两项期限均已到期。原断言把未受控的宿主调度当作固定输入，不能据此判定产品 transport 超时错误。
+
+只修改测试：慢写、分片 TLS 记录及连续会话票据使用受控单调时钟步进，仍编译真实 transport 并检查单次/全阶段绝对截止；本地 socket 的空闲等待和可续读结果另由实际时钟用例覆盖。真实 mbedTLS HTTPS 回环继续使用真实 TLS 与 socket，慢滴流改为总期限与空闲期限同为 450 毫秒，明确只检验总期限；独立 `http_deadline` 和 transport 无进展用例继续检验空闲期限。慢握手另要求客户端在服务端主动关闭前失败，测试进程设 10 秒防挂起上限。没有修改 `http_transport.c`、`http_deadline.c` 或任何产品期限配置。
+
+把这组**仅测试文件**修正分别套在父提交和当前提交后，`mac-work-1` 的完整 CTest 在普通与 AppleClang ASan/UBSan 两种构建均为 **6/6 通过**；本机直接编译的 transport ASan/UBSan 用例也通过。测试修正证明先前两项失败属于测试对宿主调度的错误假设；它不证明整个 `eota_prepare` 的严格墙钟上界，也不替代设备上的 DNS、HTTPS、Flash、签名与 bootloader 验收。P5-04、P5-05、P5-06 继续未验收。
