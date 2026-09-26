@@ -7,11 +7,20 @@ else()
     configure_file("${EOTA_LAB_SAMPLE_DIR}/lab_inputs_example.h"
         "${CMAKE_CURRENT_BINARY_DIR}/lab_inputs.h" COPYONLY)
 endif()
-idf_component_register(SRCS "${CMAKE_CURRENT_LIST_DIR}/main.c"
+if(DEFINED EOTA_P5_ROLE)
+    set(_eota_main "${CMAKE_CURRENT_LIST_DIR}/p5-baseline-main.c")
+else()
+    set(_eota_main "${CMAKE_CURRENT_LIST_DIR}/main.c")
+endif()
+idf_component_register(SRCS "${_eota_main}"
     INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}"
     REQUIRES esp_ota esp_wifi esp_netif esp_event nvs_flash esp_timer esp_system)
 if(EOTA_LAB_ARMED)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE EOTA_LAB_ARMED=1)
 else()
     target_compile_definitions(${COMPONENT_LIB} PRIVATE EOTA_LAB_ARMED=0)
+endif()
+
+if(DEFINED EOTA_P5_ROLE)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE EOTA_P5_ROLE=${EOTA_P5_ROLE})
 endif()
