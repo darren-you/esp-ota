@@ -148,3 +148,9 @@ mac-work-1 上使用同一源码的 ASan/UBSan CTest 中，`update`、`update_es
 | mac-ci-1 AppleClang 严格 ASan/UBSan 直接编译真实传输源码 | `http_transport` 通过；启用 `-fno-sanitize-recover=all` | 独立宿主复核；未写设备 |
 
 以上只修正 host 测试对宿主线程调度的假设，不改变产品超时配置或生产传输行为。P5-04 和双板实测仍未验收。
+
+## 准备收据失败清零复验（2026-09-27）
+
+在独立双目标候选 `de4a6e2` 上，`eota_prepare` 原先只在通过策略、可信时间和非空输入检查之后清空 `prepared`。先增加“成功准备 → 复用同一输出对象 → 关闭可信时间”的回归，旧源码的 C3 与 ESP32 两项测试都在旧收据未清零断言处确定性失败。修正后，任何非空 `prepared` 都在入口清零，包括无效策略、无可信时间、空镜像请求及未启用签名 OTA 的构建；成功路径仍按实际读回产出新收据。测试进一步检查这三个早退不重复启动 HTTP 或擦写 Flash。
+
+AppleClang ASan/UBSan 对直接编译 `update.c` 的 C3/ESP32 故障矩阵及其余 host CTest **5/5** 通过。本次未运行固定 SDK 的设备编译、真实 HTTPS、Flash 或 bootloader；Base 当前 worker 已按返回码分支并在栈上零初始化收据，本修正明确库本身的输出合同，不代替持久收据对账或 P5 实板验收。

@@ -421,6 +421,7 @@ eota_result_t eota_retire_inactive(const eota_policy_t *policy,
 eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *image,
                            eota_progress_t progress, void *context, eota_prepared_t *prepared)
 {
+    if (prepared != NULL) memset(prepared, 0, sizeof *prepared);
 #if !EOTA_SIGNED_ENABLED
     (void)policy; (void)image; (void)progress; (void)context; (void)prepared;
     return EOTA_UPDATE_UNSUPPORTED;
@@ -428,7 +429,6 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     if (!valid_policy(policy) || !policy->trusted_time || image == NULL || prepared == NULL) {
         return EOTA_UPDATE_INVALID_REQUEST;
     }
-    memset(prepared, 0, sizeof *prepared);
     const eota_result_t request_result = eota_validate_image_request(image);
     if (request_result != EOTA_UPDATE_OK) return request_result;
     eota_http_deadline_t deadline = {0};

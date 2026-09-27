@@ -119,8 +119,9 @@ eota_result_t eota_retire_inactive(const eota_policy_t *policy,
 /* Synchronously downloads into the inactive slot and verifies its complete
  * signed bytes. It does not select a new boot slot or reboot. ESP-IDF may
  * invalidate the inactive slot's previous otadata entry at esp_ota_begin.
- * Caller owns the worker,
- * network/time preconditions, operation receipt and serialization. Progress
+ * A non-NULL prepared output is cleared on every non-OK return, including
+ * invalid policy, missing trusted time and unsupported build. Caller owns
+ * the worker, network/time preconditions, operation receipt and serialization. Progress
  * callback must neither block nor call eota_* recursively. */
 eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *image,
                            eota_progress_t progress, void *context, eota_prepared_t *prepared);
