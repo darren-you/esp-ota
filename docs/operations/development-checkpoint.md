@@ -154,3 +154,9 @@ mac-work-1 上使用同一源码的 ASan/UBSan CTest 中，`update`、`update_es
 在独立双目标候选 `de4a6e2` 上，`eota_prepare` 原先只在通过策略、可信时间和非空输入检查之后清空 `prepared`。先增加“成功准备 → 复用同一输出对象 → 关闭可信时间”的回归，旧源码的 C3 与 ESP32 两项测试都在旧收据未清零断言处确定性失败。修正后，任何非空 `prepared` 都在入口清零，包括无效策略、无可信时间、空镜像请求及未启用签名 OTA 的构建；成功路径仍按实际读回产出新收据。测试进一步检查这三个早退不重复启动 HTTP 或擦写 Flash。
 
 AppleClang ASan/UBSan 对直接编译 `update.c` 的 C3/ESP32 故障矩阵及其余 host CTest **5/5** 通过。本次未运行固定 SDK 的设备编译、真实 HTTPS、Flash 或 bootloader；Base 当前 worker 已按返回码分支并在栈上零初始化收据，本修正明确库本身的输出合同，不代替持久收据对账或 P5 实板验收。
+
+## OTA 请求 authority 预检续验（2026-09-27）
+
+联合 OTA 会在网络连接前物理退役旧备用固件；此前静态 URL 规则接受 `https://:443/image.bin`、`https://[]/image.bin` 和非数字或越界端口。这些请求在同一输入下通过 `eota_validate_image_request`，可能使调用方先退役备用镜像，随后才因无有效主机或端口而无法下载。先把这些输入加入直接编译真实 `update.c` 的双目标回归，旧源码在静态校验断言处失败；修正后 C3 RSA 与 ESP32 ECDSA 两组 AppleClang ASan/UBSan 测试均通过。回归同时保留合法 DNS 主机、带 `443` 端口及方括号 IPv6 字面量的静态接受路径，坏请求在创建 HTTP 客户端和擦写 Flash 前被拒绝。
+
+本次检查只验证 URL authority 的基本结构，不解析 DNS、不验证主机可达性、证书或服务器镜像。当前 mac-ci-1 没有 CMake，因而本轮采用与仓根 CMake 相同的编译输入直接运行两项更新测试；未执行完整 CTest、固定 SDK 构建或实体设备升级。P5-04、P5-06 和 P6-03 仍保持进行中。

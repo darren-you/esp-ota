@@ -188,7 +188,10 @@ static void test_image_request_validation(void)
     const char *invalid_urls[] = {
         NULL, "http://example.test/image.bin", "https://", "https://?query",
         "https://user@example.test/image.bin", "https://example.test/image.bin#fragment",
-        "https://example.test/a b",
+        "https://example.test/a b", "https://:443/image.bin", "https://[]/image.bin",
+        "https://[::1/image.bin", "https://example.test:/image.bin",
+        "https://example.test:0/image.bin", "https://example.test:65536/image.bin",
+        "https://example.test:abc/image.bin", "https://example.test:443:5/image.bin",
     };
     for (size_t i = 0; i < sizeof invalid_urls / sizeof invalid_urls[0]; ++i) {
         request.image_url = invalid_urls[i];
@@ -197,6 +200,10 @@ static void test_image_request_validation(void)
                EOTA_UPDATE_INVALID_REQUEST);
         assert(init_calls == 0 && begin_calls == 0 && erase_calls == 0);
     }
+    request.image_url = "https://example.test:443/image.bin";
+    assert(eota_validate_image_request(&request) == EOTA_UPDATE_OK);
+    request.image_url = "https://[::1]:443/image.bin";
+    assert(eota_validate_image_request(&request) == EOTA_UPDATE_OK);
     char boundary_url[EOTA_URL_BYTES + 2];
     memset(boundary_url, 'a', sizeof boundary_url);
     memcpy(boundary_url, "https://", 8);

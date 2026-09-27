@@ -150,6 +150,30 @@ static eota_result_t inspect_slots(const eota_policy_t *policy, uint32_t image_s
     return image_size_bytes <= slots->target_size_bytes ? EOTA_UPDATE_OK : EOTA_UPDATE_TOO_LARGE;
 }
 
+static bool valid_authority(const char *host, const char *end)
+{
+    const char *port = NULL;
+    if (*host == '[') {
+        const char *close = memchr(host + 1, ']', (size_t)(end - host - 1));
+        if (close == NULL || close == host + 1) return false;
+        port = close + 1;
+    } else {
+        port = memchr(host, ':', (size_t)(end - host));
+        if (port == NULL) port = end;
+        if (port == host || memchr(host, '[', (size_t)(port - host)) != NULL ||
+            memchr(host, ']', (size_t)(port - host)) != NULL) return false;
+    }
+    if (port == end) return true;
+    if (*port++ != ':' || port == end) return false;
+    unsigned value = 0;
+    for (; port < end; ++port) {
+        if (*port < '0' || *port > '9') return false;
+        value = value * 10 + (unsigned)(*port - '0');
+        if (value > 65535) return false;
+    }
+    return value != 0;
+}
+
 static bool valid_url(const char *url)
 {
     if (url == NULL || strncmp(url, "https://", 8) != 0) return false;
@@ -157,7 +181,8 @@ static bool valid_url(const char *url)
     if (length <= 8 || length > EOTA_URL_BYTES) return false;
     const char *authority_end = strpbrk(url + 8, "/?#");
     if (authority_end == NULL) authority_end = url + length;
-    if (authority_end == url + 8 || *authority_end == '?' || *authority_end == '#') return false;
+    if (authority_end == url + 8 || *authority_end == '?' || *authority_end == '#' ||
+        !valid_authority(url + 8, authority_end)) return false;
     for (const char *p = url + 8; p < authority_end; ++p) if (*p == '@') return false;
     for (const char *p = url + 8; p < url + length; ++p) {
         if ((unsigned char)*p <= 0x20 || *p == '#') return false;
