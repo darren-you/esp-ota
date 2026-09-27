@@ -148,3 +148,17 @@ mac-work-1 上使用同一源码的 ASan/UBSan CTest 中，`update`、`update_es
 | mac-ci-1 AppleClang 严格 ASan/UBSan 直接编译真实传输源码 | `http_transport` 通过；启用 `-fno-sanitize-recover=all` | 独立宿主复核；未写设备 |
 
 以上只修正 host 测试对宿主线程调度的假设，不改变产品超时配置或生产传输行为。P5-04 和双板实测仍未验收。
+
+## P5-04 HTTP 内部循环期限复核（2026-09-27）
+
+固定 ESP-IDF `578cf89c343e388db43ba1f4ddcd602fedcb763c` 的 `esp_http_client.c` 源码 SHA-256 为 `327e4e8094282550431f5f154d789d5e1c04476aedc1160f53eb5eb6c6070f73`。逐行核对发现，`esp_http_client_fetch_headers` 与 `esp_http_client_read` 在各自的内部循环每轮都调用 `esp_transport_read`。本仓当前自定义 transport 的 `transport_read` 每次进入及 TLS 读取循环均检查同一单调时钟总期限／无进展期限，`tls_recv` 收到字节时先核对旧截止再登记进展。因此主计划早期“单次 HTTP 调用内持续滴流只能在调用返回后检查期限”的描述对应旧实现；当前源码在每轮传输回调处可拒绝逾期滴流，未发现需要修改固定 SDK 的此类内部循环缺口。
+
+真实 mbedTLS HTTPS host 回环现分别让响应头和响应体每 60 毫秒发送一个字节，客户端单次传输读取设置 150 毫秒，并反复调用同一生产 transport：头部用总期限／idle 期限 450／450 毫秒，正文用 700／700 毫秒，均在收到完整响应前按总期限失败。第三个场景先发完整响应头和一个正文字节，再停顿 600 毫秒；总期限 1500 毫秒、idle 期限 250 毫秒、单次读取 60 毫秒，确认至少一次可重试单次 timeout 后由 idle 截止失败。三个场景均在失败后同步清理 TLS 与 socket；正常证书、错误 CA、错误主机名、TLS 1.3 ticket 和握手期限仍在同一回归内。
+
+| 验证 | 结果 | 输入边界 |
+| --- | --- | --- |
+| mac-ci-1 AppleClang ASan/UBSan host CTest | 5/5 通过 | 固定 SDK 不在此宿主；真实 OTA/transport 源码配 HTTP、TLS、Flash 假件 |
+| mac-work-1 固定 SDK mbedTLS 4.1 原生 CTest | 6/6 通过；真实 HTTPS 用例额外连续复跑 3/3 | `check_sdk.py` 核对 IDF 与 lwIP 精确提交，回环使用临时测试 CA |
+| mac-work-1 AppleClang ASan/UBSan 原生 CTest | 6/6 通过 | 同一测试输入，独立构建目录，未写设备 |
+
+这组 host 回环执行真实生产 transport 和锁定 SDK mbedTLS，HTTP 头／体阶段由测试客户端观察；它不编译执行 SDK 的 `esp_http_client` 解析器，也不包含设备 lwIP、证书 bundle、Flash 或 bootloader。固定 SDK 的单次 HTTP 解析、TLS 密码学及 Flash 调用仍无法被此期限机制抢占；P5-04 和实板长滴流验收继续进行中。

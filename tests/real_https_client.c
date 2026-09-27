@@ -93,13 +93,14 @@ int esp_crt_bundle_attach(void *config)
 
 int main(int argc, char **argv)
 {
-    assert(argc == 6);
+    assert(argc == 7);
     const char *hostname = argv[1];
     const int port = atoi(argv[2]);
     const char *ca_path = argv[3];
     const uint32_t total_ms = (uint32_t)atoi(argv[4]);
     const uint32_t idle_ms = (uint32_t)atoi(argv[5]);
-    assert(port > 0 && total_ms > 0 && idle_ms > 0);
+    const int read_timeout_ms = atoi(argv[6]);
+    assert(port > 0 && total_ms > 0 && idle_ms > 0 && read_timeout_ms > 0);
     assert(psa_crypto_init() == PSA_SUCCESS);
     mbedtls_x509_crt_init(&test_ca);
     assert(mbedtls_x509_crt_parse_file(&test_ca, ca_path) == 0);
@@ -125,17 +126,23 @@ int main(int argc, char **argv)
     }
     char received[256] = {0};
     size_t used = 0;
+    unsigned read_timeouts = 0;
     if (success) {
-        stage = "read";
+        stage = "read_header";
         while (used < sizeof received - 1) {
             const int count = transport->read(transport, received + used,
-                                              (int)(sizeof received - 1 - used), -1);
+                                              (int)(sizeof received - 1 - used), read_timeout_ms);
+            if (count == ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT) {
+                ++read_timeouts;
+                continue;
+            }
             if (count <= 0) {
-                success = count == 0 && strstr(received, "hello") != NULL;
+                success = false;
                 break;
             }
             used += (size_t)count;
             received[used] = '\0';
+            if (strstr(received, "\r\n\r\n") != NULL) stage = "read_body";
             if (strstr(received, "hello") != NULL) break;
         }
         if (strstr(received, "hello") == NULL) success = false;
@@ -145,7 +152,7 @@ int main(int argc, char **argv)
     transport->close(transport);
     esp_transport_destroy(transport);
     mbedtls_x509_crt_free(&test_ca);
-    printf("%s %s %lld bytes=%zu\n", success ? "success" : "failure", stage,
-           (long long)elapsed_ms, used);
+    printf("%s %s %lld bytes=%zu timeouts=%u\n", success ? "success" : "failure",
+           stage, (long long)elapsed_ms, used, read_timeouts);
     return success ? 0 : 2;
 }
