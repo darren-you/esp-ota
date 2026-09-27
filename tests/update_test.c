@@ -122,6 +122,44 @@ static void digest(eota_image_t *request)
 
 static void progress(uint32_t received, uint32_t total, void *context);
 
+static void assert_cleared_prepared(const eota_prepared_t *prepared)
+{
+    const eota_prepared_t empty = {0};
+    assert(memcmp(prepared, &empty, sizeof empty) == 0);
+}
+
+static void test_prepare_invalid_preconditions_clear_previous_receipt(void)
+{
+    eota_image_t request = {
+        .image_url = "https://example.test/esp-base.bin",
+        .image_size_bytes = IMAGE_BYTES,
+    };
+    eota_prepared_t prepared = {0};
+    reset();
+    digest(&request);
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) == EOTA_UPDATE_OK);
+    assert(prepared.image_size_bytes == IMAGE_BYTES);
+
+    policy.trusted_time = false;
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) ==
+           EOTA_UPDATE_INVALID_REQUEST);
+    assert_cleared_prepared(&prepared);
+    policy.trusted_time = true;
+
+    memset(&prepared, 0xa5, sizeof prepared);
+    policy.project_name[0] = '\0';
+    assert(eota_prepare(&policy, &request, progress, NULL, &prepared) ==
+           EOTA_UPDATE_INVALID_REQUEST);
+    assert_cleared_prepared(&prepared);
+    strcpy(policy.project_name, "esp_base");
+
+    memset(&prepared, 0xa5, sizeof prepared);
+    assert(eota_prepare(&policy, NULL, progress, NULL, &prepared) ==
+           EOTA_UPDATE_INVALID_REQUEST);
+    assert_cleared_prepared(&prepared);
+    assert(init_calls == 1 && begin_calls == 1 && erase_calls == 0);
+}
+
 static void test_image_request_validation(void)
 {
     eota_image_t request = {
@@ -523,6 +561,7 @@ int main(void)
 {
     eota_image_t request = {.image_url = "https://example.test/esp-base.bin", .image_size_bytes = IMAGE_BYTES};
     assert(eota_available());
+    test_prepare_invalid_preconditions_clear_previous_receipt();
     test_image_request_validation();
     test_retire_inactive();
     reset(); digest(&request);
