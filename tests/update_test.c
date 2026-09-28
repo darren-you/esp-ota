@@ -228,10 +228,11 @@ static void test_image_request_validation(void)
 int64_t esp_timer_get_time(void) { return now_us; }
 int esp_crt_bundle_attach(void *config) { (void)config; return 0; }
 const esp_partition_t *esp_ota_get_running_partition(void)
-{ return reverse_slots ? &new_slot : &old_slot; }
-const esp_partition_t *esp_ota_get_boot_partition(void) { return boot; }
+{ assert(!flash_gate_enabled || flash_gate_active); return reverse_slots ? &new_slot : &old_slot; }
+const esp_partition_t *esp_ota_get_boot_partition(void)
+{ assert(!flash_gate_enabled || flash_gate_active); return boot; }
 const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *partition)
-{ assert(partition == NULL); return selected_slot; }
+{ assert((!flash_gate_enabled || flash_gate_active) && partition == NULL); return selected_slot; }
 const esp_partition_t *esp_partition_find_first(int type, int subtype, const char *label)
 {
     assert(type == ESP_PARTITION_TYPE_APP && label == NULL);
@@ -259,6 +260,7 @@ esp_err_t esp_image_verify(esp_image_load_mode_t mode,
 }
 esp_err_t esp_ota_get_state_partition(const esp_partition_t *partition, esp_ota_img_states_t *state)
 {
+    assert(!flash_gate_enabled || flash_gate_active);
     assert(partition == &old_slot || partition == &new_slot);
     if (preflight_advance_us > 0) {
         advance_time(preflight_advance_us);
@@ -271,7 +273,8 @@ esp_err_t esp_ota_get_state_partition(const esp_partition_t *partition, esp_ota_
     *state = target_state;
     return target_lookup;
 }
-bool esp_ota_check_rollback_is_possible(void) { return rollback_possible; }
+bool esp_ota_check_rollback_is_possible(void)
+{ assert(!flash_gate_enabled || flash_gate_active); return rollback_possible; }
 esp_err_t esp_ota_check_image_validity(int type, const esp_image_header_t *header, const esp_app_desc_t *desc)
 {
     assert(type == ESP_PARTITION_TYPE_APP && header->magic == ESP_IMAGE_HEADER_MAGIC);
@@ -522,13 +525,18 @@ static void test_flash_gate(void)
 
     reset(); digest(&request); use_flash_gate(); flash_gate_deny_at = 2;
     assert(run_update(&request) == EOTA_UPDATE_RESOURCE_FAILURE);
-    assert(begin_calls == 1 && write_calls == 0 && abort_calls == 1 &&
+    assert(begin_calls == 0 && write_calls == 0 && abort_calls == 0 &&
            flash_gate_releases == 1 && !flash_gate_active);
 
-    reset(); digest(&request); use_flash_gate(); flash_gate_fail_release_at = 1;
+    reset(); digest(&request); use_flash_gate(); flash_gate_deny_at = 3;
+    assert(run_update(&request) == EOTA_UPDATE_RESOURCE_FAILURE);
+    assert(begin_calls == 1 && write_calls == 0 && abort_calls == 1 &&
+           flash_gate_releases == 2 && !flash_gate_active);
+
+    reset(); digest(&request); use_flash_gate(); flash_gate_fail_release_at = 2;
     assert(run_update(&request) == EOTA_UPDATE_BOOT_STATE_UNKNOWN);
     assert(begin_calls == 1 && write_calls == 0 && abort_calls == 1 &&
-           flash_gate_releases == 1 && !flash_gate_active);
+           flash_gate_releases == 2 && !flash_gate_active);
 
     reset(); digest(&request); use_flash_gate(); select_then_fail = true;
     assert(run_update(&request) == EOTA_UPDATE_SLOT_UNAVAILABLE);

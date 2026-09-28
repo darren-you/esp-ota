@@ -118,11 +118,11 @@ static bool read_state(const esp_partition_t *partition, eota_state_t *state)
     return true;
 }
 
-static eota_result_t observe_slots(const eota_policy_t *policy, eota_slots_t *slots,
-                                   const esp_partition_t **running_out,
-                                   const esp_partition_t **target_out)
+static eota_result_t observe_slots_unlocked(const eota_policy_t *policy,
+                                            eota_slots_t *slots,
+                                            const esp_partition_t **running_out,
+                                            const esp_partition_t **target_out)
 {
-    if (!valid_policy(policy) || slots == NULL) return EOTA_UPDATE_INVALID_REQUEST;
     memset(slots, 0, sizeof *slots);
     const esp_partition_t *running = esp_ota_get_running_partition();
     const esp_partition_t *boot = esp_ota_get_boot_partition();
@@ -151,6 +151,36 @@ static eota_result_t observe_slots(const eota_policy_t *policy, eota_slots_t *sl
         !read_state(target, &slots->target_state)) return EOTA_UPDATE_SLOT_UNAVAILABLE;
     if (running_out != NULL) *running_out = running;
     if (target_out != NULL) *target_out = target;
+    return EOTA_UPDATE_OK;
+}
+
+static eota_result_t observe_slots(const eota_policy_t *policy, eota_slots_t *slots,
+                                   const esp_partition_t **running_out,
+                                   const esp_partition_t **target_out)
+{
+    if (!valid_policy(policy) || slots == NULL) return EOTA_UPDATE_INVALID_REQUEST;
+    if (!flash_io_acquire(policy)) return EOTA_UPDATE_RESOURCE_FAILURE;
+    const eota_result_t result = observe_slots_unlocked(policy, slots,
+                                                         running_out, target_out);
+    return flash_io_release(policy) ? result : EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+}
+
+static eota_result_t boot_matches(const eota_policy_t *policy,
+                                  const esp_partition_t *partition, bool *matches)
+{
+    if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    *matches = same_partition(esp_ota_get_boot_partition(), partition);
+    return flash_io_release(policy) ? EOTA_UPDATE_OK : EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+}
+
+static eota_result_t read_raw_state(const eota_policy_t *policy,
+                                    const esp_partition_t *partition,
+                                    esp_ota_img_states_t *state,
+                                    esp_err_t *sdk_result)
+{
+    if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    *sdk_result = esp_ota_get_state_partition(partition, state);
+    if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     return EOTA_UPDATE_OK;
 }
 
@@ -393,8 +423,9 @@ eota_result_t eota_retire_inactive(const eota_policy_t *policy,
     eota_slots_t before = {0};
     const esp_partition_t *running = NULL;
     const esp_partition_t *target = NULL;
-    if (observe_slots(policy, &before, &running, &target) != EOTA_UPDATE_OK ||
-        before.running_subtype != before.boot_subtype ||
+    const eota_result_t observed = observe_slots(policy, &before, &running, &target);
+    if (observed != EOTA_UPDATE_OK) return observed;
+    if (before.running_subtype != before.boot_subtype ||
         before.target_subtype != expected_target_subtype ||
         before.running_state != EOTA_STATE_VALID ||
         (before.target_state != EOTA_STATE_UNTRACKED &&
@@ -673,22 +704,33 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
     if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     const esp_err_t select = esp_ota_set_boot_partition(target);
     if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     const bool target_selected = same_partition(esp_ota_get_boot_partition(), target);
-    if (select == ESP_OK && target_selected && esp_ota_check_rollback_is_possible()) {
+    const bool rollback_possible = select == ESP_OK && target_selected &&
+        esp_ota_check_rollback_is_possible();
+    if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    if (rollback_possible) {
         return EOTA_UPDATE_OK;
     }
     /* A failed selector write may have reached otadata even if readback still
      * names the running slot. Restore and inspect both durable slot states. */
-    if (!same_partition(esp_ota_get_boot_partition(), running)) {
+    bool running_selected = false;
+    if (boot_matches(policy, running, &running_selected) != EOTA_UPDATE_OK) {
+        return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    }
+    if (!running_selected) {
         if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
         (void)esp_ota_set_boot_partition(running);
         if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     }
-    if (!same_partition(esp_ota_get_boot_partition(), running)) {
+    if (boot_matches(policy, running, &running_selected) != EOTA_UPDATE_OK ||
+        !running_selected) {
         return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     }
     esp_ota_img_states_t running_state;
-    if (esp_ota_get_state_partition(running, &running_state) != ESP_OK) {
+    esp_err_t state_status;
+    if (read_raw_state(policy, running, &running_state, &state_status) != EOTA_UPDATE_OK ||
+        state_status != ESP_OK) {
         return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     }
     if (running_state == ESP_OTA_IMG_NEW) {
@@ -697,7 +739,8 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
         if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
         (void)esp_ota_mark_app_valid_cancel_rollback();
         if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
-        if (esp_ota_get_state_partition(running, &running_state) != ESP_OK ||
+        if (read_raw_state(policy, running, &running_state, &state_status) != EOTA_UPDATE_OK ||
+            state_status != ESP_OK ||
             running_state != ESP_OTA_IMG_VALID) {
             return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
         }
@@ -705,7 +748,10 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
         return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     }
     esp_ota_img_states_t target_state;
-    if (esp_ota_get_state_partition(target, &target_state) == ESP_OK &&
+    if (read_raw_state(policy, target, &target_state, &state_status) != EOTA_UPDATE_OK) {
+        return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    }
+    if (state_status == ESP_OK &&
         (target_state == ESP_OTA_IMG_NEW || target_state == ESP_OTA_IMG_PENDING_VERIFY)) {
         /* The failed selection left an unbooted candidate in otadata. */
         if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
@@ -731,7 +777,9 @@ eota_result_t eota_sha256_running(const eota_policy_t *policy, uint32_t size_byt
 #else
     if (!valid_policy(policy) || digest == NULL || size_bytes == 0) return EOTA_UPDATE_INVALID_REQUEST;
     memset(digest, 0, EOTA_SHA256_BYTES);
+    if (!flash_io_acquire(policy)) return EOTA_UPDATE_RESOURCE_FAILURE;
     const esp_partition_t *running = esp_ota_get_running_partition();
+    if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     if (!expected_slot(running, policy)) return EOTA_UPDATE_SLOT_UNAVAILABLE;
     if (size_bytes > running->size) return EOTA_UPDATE_TOO_LARGE;
     const eota_result_t result = verify_image_size(policy, running, size_bytes, NULL);
