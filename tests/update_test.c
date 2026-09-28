@@ -13,7 +13,7 @@
 #include <string.h>
 
 #define IMAGE_BYTES 1152
-#define CHIP_ID 5
+#define CHIP_ID EOTA_TEST_CHIP_ID
 #define PREFIX_BYTES (sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t))
 
 static eota_policy_t policy = {
@@ -418,6 +418,9 @@ int main(void)
     policy.project_name[0] = '\0';
     assert(eota_preflight(&policy, IMAGE_BYTES, &slots) == EOTA_UPDATE_INVALID_REQUEST);
     strcpy(policy.project_name, "esp_base");
+    policy.chip_id = ESP_CHIP_ID_INVALID;
+    assert(eota_preflight(&policy, IMAGE_BYTES, &slots) == EOTA_UPDATE_INVALID_REQUEST);
+    policy.chip_id = CHIP_ID;
     policy.ota_1_address_bytes++;
     assert(eota_preflight(&policy, IMAGE_BYTES, &slots) == EOTA_UPDATE_SLOT_UNAVAILABLE);
     policy.ota_1_address_bytes--;

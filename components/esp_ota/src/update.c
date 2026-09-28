@@ -8,9 +8,18 @@
 
 #include "sdkconfig.h"
 
-#if defined(CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT) && \
+#if (defined(CONFIG_IDF_TARGET_ESP32C3) && \
+     defined(CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME)) || \
+    (defined(CONFIG_IDF_TARGET_ESP32) && \
+     defined(CONFIG_SECURE_SIGNED_APPS_ECDSA_SCHEME))
+#define EOTA_SIGNED_SCHEME_SUPPORTED 1
+#else
+#define EOTA_SIGNED_SCHEME_SUPPORTED 0
+#endif
+
+#if EOTA_SIGNED_SCHEME_SUPPORTED && \
+    defined(CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT) && \
     defined(CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT) && \
-    defined(CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME) && \
     defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE) && \
     defined(CONFIG_MBEDTLS_HAVE_TIME_DATE) && \
     defined(CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS) && \
@@ -40,7 +49,7 @@ static bool valid_policy(const eota_policy_t *policy)
 {
     if (policy == NULL || policy->project_name[0] == '\0' ||
         strnlen(policy->project_name, sizeof policy->project_name) == sizeof policy->project_name ||
-        policy->chip_id == 0 || policy->ota_size_bytes == 0 ||
+        policy->chip_id == ESP_CHIP_ID_INVALID || policy->ota_size_bytes == 0 ||
         policy->ota_0_address_bytes == policy->ota_1_address_bytes ||
         policy->connect_timeout_ms == 0 || policy->read_timeout_ms == 0 ||
         policy->idle_timeout_ms == 0 || policy->total_timeout_ms == 0 ||

@@ -5,15 +5,18 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 include(CTest)
 option(EOTA_REAL_HTTPS_TEST "Build the native SDK Mbed TLS HTTPS loopback test" OFF)
 if(BUILD_TESTING)
-    add_executable(eota_update_test components/esp_ota/src/update.c
-        components/esp_ota/src/http_deadline.c tests/update_test.c)
-    target_include_directories(eota_update_test PRIVATE components/esp_ota/include
-        components/esp_ota/src
-        tests/fakes/ota_update tests/fakes)
-    target_compile_definitions(eota_update_test PRIVATE _GNU_SOURCE
-        CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=1)
-    target_compile_options(eota_update_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-    add_test(NAME update COMMAND eota_update_test)
+    function(add_eota_update_test target test_name chip_id)
+        add_executable(${target} components/esp_ota/src/update.c
+            components/esp_ota/src/http_deadline.c tests/update_test.c)
+        target_include_directories(${target} PRIVATE components/esp_ota/include
+            components/esp_ota/src tests/fakes/ota_update tests/fakes)
+        target_compile_definitions(${target} PRIVATE _GNU_SOURCE
+            CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=1 EOTA_TEST_CHIP_ID=${chip_id})
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+        add_test(NAME ${test_name} COMMAND ${target})
+    endfunction()
+    add_eota_update_test(eota_update_test update 5)
+    add_eota_update_test(eota_update_esp32_test update_esp32 0)
 
     find_package(Threads REQUIRED)
     add_executable(eota_http_deadline_test components/esp_ota/src/http_deadline.c

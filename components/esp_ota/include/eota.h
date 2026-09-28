@@ -88,8 +88,8 @@ typedef enum {
 
 typedef void (*eota_progress_t)(uint32_t received_bytes, uint32_t total_bytes, void *context);
 
-/* Signed app update, RSA-3072, HTTPS certificate bundle and bootloader
- * rollback must all be enabled in the consumer's SDK configuration. */
+/* Signed app update (C3 RSA-3072 or ESP32 ECDSA v1), HTTPS certificate bundle
+ * and bootloader rollback must all be enabled in the consumer's SDK config. */
 bool eota_available(void);
 /* Read the actual running, selected boot and next inactive OTA slot, including
  * durable image states. It does not imply that an upgrade is safe to start. */

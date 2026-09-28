@@ -1,4 +1,5 @@
 /build/
+/build-*/
 /sdkconfig
 /sdkconfig.old
 /examples/c3/build/
@@ -7,3 +8,9 @@
 /examples/c3/dependencies.lock
 /examples/c3/managed_components/
 /examples/c3/lab_inputs.h
+/examples/esp32/build-*/
+/examples/esp32/sdkconfig
+/examples/esp32/sdkconfig.old
+/examples/esp32/dependencies.lock
+/examples/esp32/managed_components/
+/examples/esp32/lab_inputs.h

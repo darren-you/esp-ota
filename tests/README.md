@@ -4,7 +4,7 @@
 
 ```mermaid
 flowchart LR
-    cmake["仓根 CMake / CTest"] --> update["update_test.c：SDK/HTTP/Flash 假件"]
+    cmake["仓根 CMake / CTest"] --> update["update_test.c：C3 / ESP32 SDK、HTTP、Flash 假件"]
     cmake --> drip["http_deadline_test.c：单调时钟边界"]
     cmake --> transport["http_transport_test.c：DNS、TCP、TLS 与读写故障"]
     cmake --> https["real_https_loopback.py：真实 mbedTLS HTTPS 回环"]
@@ -17,15 +17,15 @@ flowchart LR
     https --> deadline
     https --> sdk["固定 IDF 源码中的 mbedTLS 4.1"]
     confirm --> real_ota["真实 components/esp_ota/src/ota.c"]
-    c3["固定 ESP-IDF C3 构建"] --> real_update
-    c3 --> real_ota
+    idf["固定 ESP-IDF C3 / ESP32 构建"] --> real_update
+    idf --> real_ota
 ```
 
 从仓根运行 `cmake -S . -B build -DBUILD_TESTING=ON && cmake --build build && ctest --test-dir build --output-on-failure`。AppleClang 可增加 `-DCMAKE_C_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer'` 与相同 linker flags。`update_test` 用假件模拟 SDK 调用内的慢滴流与升级故障；`http_deadline_test` 用可控单调时钟验证迟到字节不得刷新旧无进展期限、持续进展不得延长总期限及时钟异常。`http_transport_test` 编译真实 transport 源码，配 DNS/TLS 假件与本地 TCP 服务复现 DNS 迟到回调、连接故障、握手延迟、请求写入和响应读取慢滴流。
 
-`update_test` 的 selector 故障假件还按固定 IDF 语义把每次 `esp_ota_set_boot_partition` 的新 active 状态置为 NEW：验证目标已切换与 boot 仍指旧槽两种返回失败路径；恢复旧槽时重置为 VALID、清除未启动候选的 NEW 记录、预检可再次通过；恢复状态或清除记录失败则报告 boot 状态不确定。另用同一份已准备镜像在选槽前切换项目名、芯片 ID 与 SDK 镜像头约束，要求不进入 boot selector。它还在槽预检、擦除、写入、HTTP 清理、分区读回和验签调用中推进假单调时钟，验证逾期后不再产出准备结果或执行切槽；槽预检耗尽总期限时不得创建网络客户端或写 Flash。`ota_test` 验证 UNTRACKED 状态不能冒充已确认的 pending 镜像。
+`update_test` 与 `update_esp32` 分别用官方芯片 ID `0x0005` 和 `0x0000` 编译相同真实更新源码与完整故障矩阵，检查零值 ESP32 ID 可通过预检、无效哨兵 `0xffff` 被拒。selector 假件按固定 IDF 语义把每次 `esp_ota_set_boot_partition` 的新 active 状态置为 NEW：验证目标已切换与 boot 仍指旧槽两种返回失败路径；恢复旧槽时重置为 VALID、清除未启动候选的 NEW 记录、预检可再次通过；恢复状态或清除记录失败则报告 boot 状态不确定。另用同一份已准备镜像在选槽前切换项目名、芯片 ID 与 SDK 镜像头约束，要求不进入 boot selector。它还在槽预检、擦除、写入、HTTP 清理、分区读回和验签调用中推进假单调时钟，验证逾期后不再产出准备结果或执行切槽；槽预检耗尽总期限时不得创建网络客户端或写 Flash。`ota_test` 验证 UNTRACKED 状态不能冒充已确认的 pending 镜像。
 
-同一 `update_test` 的镜像身份假件核对精确分区地址、SDK 验镜像先于整份 signed bin 摘要、末尾签名字节影响摘要、坏镜像／Flash 故障／错误几何拒绝及失败输出清零。假件不能证明真实 RSA 验签，签名 C3 构建只证明锁定 SDK 的 API 与配置可编译；真实可启动集合还要联合 otadata、boot selector、回退资格及设备读回。
+同一 `update_test` 的镜像身份假件核对精确分区地址、SDK 验镜像先于整份 signed bin 摘要、末尾签名字节影响摘要、坏镜像／Flash 故障／错误几何拒绝及失败输出清零。C3 使用 RSA 配置宏，ESP32 使用 ECDSA v1 配置宏；假件不能证明真实签名验签，离线签名构建只证明锁定 SDK 的 API 与配置可编译；真实可启动集合还要联合 otadata、boot selector、回退资格及设备读回。
 
 完整镜像长度回归要求准备、切槽和运行镜像收据查询都拒绝与 SDK 已验签 `image_len` 不一致的短请求或附加尾缀，覆盖签名失败、Flash／内存故障及额外验签返回时期限已尽。准备失败不得产出收据，选择失败不得写 boot selector；已经由 `esp_ota_end` 释放的句柄不能再 abort。该组测试曾在仅按请求长度摘要的旧实现上确定性失败。
 
