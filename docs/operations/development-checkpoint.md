@@ -160,3 +160,16 @@ AppleClang ASan/UBSan 对直接编译 `update.c` 的 C3/ESP32 故障矩阵及其
 联合 OTA 会在网络连接前物理退役旧备用固件；此前静态 URL 规则接受 `https://:443/image.bin`、`https://[]/image.bin` 和非数字或越界端口。这些请求在同一输入下通过 `eota_validate_image_request`，可能使调用方先退役备用镜像，随后才因无有效主机或端口而无法下载。先把这些输入加入直接编译真实 `update.c` 的双目标回归，旧源码在静态校验断言处失败；修正后 C3 RSA 与 ESP32 ECDSA 两组 AppleClang ASan/UBSan 测试均通过。回归同时保留合法 DNS 主机、带 `443` 端口及方括号 IPv6 字面量的静态接受路径，坏请求在创建 HTTP 客户端和擦写 Flash 前被拒绝。
 
 本次检查只验证 URL authority 的基本结构，不解析 DNS、不验证主机可达性、证书或服务器镜像。当前 mac-ci-1 没有 CMake，因而本轮采用与仓根 CMake 相同的编译输入直接运行两项更新测试；未执行完整 CTest、固定 SDK 构建或实体设备升级。P5-04、P5-06 和 P6-03 仍保持进行中。
+
+## P5 双板当前源码离线复验（2026-09-29）
+
+以当前 `d98361f` 源码、固定 ESP-IDF `578cf89c343e388db43ba1f4ddcd602fedcb763c` 与 lwIP `2758df4cd3666b3b2a5b53830148379326425c0d` 重新验证。mac-pro-1 的 AppleClang ASan/UBSan、固定 SDK mbedTLS 真实 HTTPS host 回环 CTest 为 **6/6 通过**。源码以 `git archive` 复制到 mac-work-1 的仓外目录构建，未使用相邻仓源码；SDK 锁检查通过。
+
+| 当前源码候选 | 镜像与签名核对 | 分区与启动约束 |
+| --- | --- | --- |
+| C3 默认未武装 | app `0x28190` 字节 | 只检查槽；不执行 OTA 写入 |
+| ESP32 默认未武装 | app `0x264b0` 字节 | 官方通用双 OTA 表仅用于离线编译，不能用于旧 AT 板 |
+| C3 仓外临时 RSA-3072 测试键 | app `0x31000` 字节，SHA-256 `69e1fc80193c204dd306ee06ffe33ad001898b3092a93296ff2cd63a09eef624`；官方 `espsecure verify-signature --version 2 --keyfile` 通过 | 按旧 C3 实际分区装配；生成表补齐至 4 KiB 后与该板原恢复件的表扇区逐字节相同 |
+| ESP32 仓外临时 ECDSA P-256 测试键 | app 196596 字节，SHA-256 `a0088fe4c7078b58efdb15c5eeab1017dba0ecef4a56c9e6e60875288e068f30`；官方 `espsecure verify-signature --version 1 --keyfile` 通过 | 旧 AT 几何与 `BOOTLOADER_LOG_LEVEL_NONE`、禁用分区表 MD5；bootloader 23312 字节，低于表偏移前的 28672 字节空间 |
+
+ESP32 生成的**未签名**分区表前 3072 字节与该板旧 AT 恢复件同位置逐字节一致。固定 SDK 对分区表继续追加 ECDSA v1 签名块，使最终文件由 3072 变为 3140 字节；官方 `espsecure verify-signature --version 1 --keyfile` 对该表通过。该最终文件与旧板原有 4 KiB 分区表扇区并非逐字节相同，故不能以签名表替换旧表或据此声称旧 bootloader 已兼容。当前候选没有烧写 bootloader、分区表或 app，没有打开两板串口，也没有使用真实 Wi-Fi、HTTPS 镜像服务、生产签名材料或 eFuse。样例未武装，未调用设备侧 `eota_prepare`；P5-04/P5-05 的持续签名运行、完整 HTTPS/Flash/bootloader、回退及恢复验收仍未完成。
