@@ -245,6 +245,7 @@ esp_err_t esp_image_verify(esp_image_load_mode_t mode,
                            const esp_partition_pos_t *part,
                            esp_image_metadata_t *metadata)
 {
+    assert(!flash_gate_enabled || flash_gate_active);
     assert(mode == ESP_IMAGE_VERIFY && part != NULL && metadata != NULL);
     assert((part->offset == old_slot.address && part->size == old_slot.size) ||
            (part->offset == new_slot.address && part->size == new_slot.size));
@@ -342,6 +343,7 @@ esp_err_t esp_ota_invalidate_inactive_ota_data_slot(void)
 }
 esp_err_t esp_partition_read(const esp_partition_t *partition, size_t offset, void *data, size_t size)
 {
+    assert(!flash_gate_enabled || flash_gate_active);
     assert(partition == &old_slot || partition == &new_slot);
     ++partition_reads;
     advance_time(flash_read_advance_us);
@@ -511,7 +513,8 @@ static void test_flash_gate(void)
     reset(); digest(&request); use_flash_gate();
     assert(run_update(&request) == EOTA_UPDATE_OK);
     assert(!flash_gate_active && flash_gate_acquires == flash_gate_releases &&
-           flash_gate_acquires == begin_calls + write_calls + end_calls + select_calls);
+           flash_gate_acquires > begin_calls + write_calls + end_calls + select_calls &&
+           image_verify_calls > 0 && partition_reads > 0);
 
     reset(); digest(&request); use_flash_gate(); flash_gate_deny_at = 1;
     assert(run_update(&request) == EOTA_UPDATE_RESOURCE_FAILURE);
@@ -534,19 +537,35 @@ static void test_flash_gate(void)
 
     uint8_t source_sha256[EOTA_SHA256_BYTES];
     uint32_t source_size = 0;
+    reset(); use_flash_gate(); signed_inactive(); flash_gate_deny_at = 1;
+    memset(source_sha256, 0xa5, sizeof source_sha256);
+    source_size = 7;
+    assert(eota_sha256_verified_image(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_0,
+                                      &source_size, source_sha256) == EOTA_UPDATE_RESOURCE_FAILURE);
+    assert(image_verify_calls == 0 && partition_reads == 0 && source_size == 0 &&
+           source_sha256[0] == 0 && !flash_gate_active);
+
+    reset(); use_flash_gate(); signed_inactive(); flash_gate_fail_release_at = 2;
+    assert(eota_sha256_verified_image(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_0,
+                                      &source_size, source_sha256) == EOTA_UPDATE_BOOT_STATE_UNKNOWN);
+    assert(image_verify_calls == 1 && partition_reads == 1 && source_size == 0 &&
+           source_sha256[0] == 0 && !flash_gate_active);
+
     reset(); use_flash_gate(); signed_inactive();
     assert(eota_sha256_verified_image(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_0,
                                       &source_size, source_sha256) == EOTA_UPDATE_OK);
     assert(eota_retire_inactive(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_1,
                                 source_sha256) == EOTA_UPDATE_OK);
     assert(erase_calls == 1 && invalidate_calls == 1 &&
-           flash_gate_acquires == 1 && flash_gate_releases == 1 && !flash_gate_active);
+           flash_gate_acquires == flash_gate_releases &&
+           flash_gate_acquires > 1 && !flash_gate_active);
 
-    reset(); use_flash_gate(); signed_inactive(); flash_gate_deny_at = 1;
+    reset(); use_flash_gate(); signed_inactive();
     assert(eota_sha256_verified_image(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_0,
                                       &source_size, source_sha256) == EOTA_UPDATE_OK);
+    flash_gate_deny_at = flash_gate_acquires + 1;
     assert(eota_retire_inactive(&policy, ESP_PARTITION_SUBTYPE_APP_OTA_1,
-                                source_sha256) == EOTA_UPDATE_BOOT_STATE_UNKNOWN);
+                                source_sha256) == EOTA_UPDATE_RESOURCE_FAILURE);
     assert(erase_calls == 0 && invalidate_calls == 0 && !flash_gate_active);
 }
 

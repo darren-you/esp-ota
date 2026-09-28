@@ -1,5 +1,7 @@
 # ESP OTA 开发检查点
 
+2026-09-29 P6-03 显式镜像读取接线：`eota_prepare`／`select`／退役及运行镜像身份核对中的 `esp_partition_read` 每次先取得调用方 Flash I/O claim，单次最多读取 1024 字节，释放后才执行 PSA 摘要计算；`esp_image_verify` 在整次 SDK 调用期间持有 claim。获取失败不读取，释放失败返回状态不明。AppleClang ASan/UBSan 双目标 host CTest 5/5 通过，假件逐次断言读取和验签持有 gate，并覆盖获取拒绝及读取后释放失败。固定 SDK 的 C3 RSA v2 与 ESP32 ECDSA v1 仓外测试键签名样例重新编译并经官方验签，镜像分别为 `0x111000`／`0xffff4` B。槽状态观察与 SDK 验签调用的实际最长占用尚未测量，不能据此认定最大 FRP 记录同机活性或 P4-05/P6-03/P7 已验收；本轮未写实体设备。
+
 2026-09-29 P5-07/P6-03 短 Flash I/O 回调软件切片：`eota_policy_t.flash_io` 接收调用方成对的获取／释放回调，OTA 库在旧槽首扇区擦除／otadata 失效、`esp_ota_begin`、每次 `esp_ota_write`、`esp_ota_end` 和切槽／恢复写入外侧获取短 claim，HTTP 等待与进度回调前释放。获取失败不发起该次写入，释放失败返回状态不明。固定 SDK 源码编译的 C3 RSA v2 与 ESP32 ECDSA v1 仓外测试键签名样例通过官方验签；AppleClang ASan/UBSan host CTest 5/5 通过，包含 SDK 假件检查写入确实持有 gate、失败路径释放与退役门。尚无实体 Flash 时延、FRP 最大记录并发或 Base pending／NVS 接线证明，不将此切片计作 P4-05/P6-03/P7 验收。
 
 本轮建立 `components/esp_ota` 独立组件与 C3 样例，迁入 Base 通用 OTA 机制并拆为 `preflight → prepare → select`。`prepare` 不切启动槽；`select` 重验实际槽、完整 signed bin 摘要与 SDK 签名。`eota_observe_slots` 向 Base 收据层提供只读实际槽及镜像状态。Base 业务收据、自检与授权没有搬入本仓。来源文件已对应 Base 公开提交 `10cb8514e8f7a3a55b8ec4622cce4f98a0f90eea`，见[来源记录](../design/source-provenance.md)。

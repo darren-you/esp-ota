@@ -74,6 +74,16 @@ static bool flash_io_release(const eota_policy_t *policy)
            policy->flash_io.release(policy->flash_io.context);
 }
 
+static eota_result_t flash_read_partition(const eota_policy_t *policy,
+                                          const esp_partition_t *partition,
+                                          size_t offset, void *data, size_t size)
+{
+    if (!flash_io_acquire(policy)) return EOTA_UPDATE_RESOURCE_FAILURE;
+    const esp_err_t read = esp_partition_read(partition, offset, data, size);
+    if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    return read == ESP_OK ? EOTA_UPDATE_OK : EOTA_UPDATE_RESOURCE_FAILURE;
+}
+
 static bool same_partition(const esp_partition_t *a, const esp_partition_t *b)
 {
     return a != NULL && b != NULL && a->type == b->type && a->subtype == b->subtype &&
@@ -220,7 +230,8 @@ static bool matches_image_target(const eota_policy_t *policy,
                                         &app_desc) == ESP_OK;
 }
 
-static eota_result_t hash_partition(const esp_partition_t *partition, uint32_t size,
+static eota_result_t hash_partition(const eota_policy_t *policy,
+                                    const esp_partition_t *partition, uint32_t size,
                                     uint8_t digest[EOTA_SHA256_BYTES],
                                     const eota_http_deadline_t *deadline)
 {
@@ -234,8 +245,13 @@ static eota_result_t hash_partition(const esp_partition_t *partition, uint32_t s
             return EOTA_UPDATE_DOWNLOAD_FAILED;
         }
         const size_t chunk = size - offset < sizeof buffer ? size - offset : sizeof buffer;
-        if (esp_partition_read(partition, offset, buffer, chunk) != ESP_OK ||
-            psa_hash_update(&hash, buffer, chunk) != PSA_SUCCESS) {
+        const eota_result_t read = flash_read_partition(policy, partition, offset,
+                                                        buffer, chunk);
+        if (read != EOTA_UPDATE_OK) {
+            (void)psa_hash_abort(&hash);
+            return read;
+        }
+        if (psa_hash_update(&hash, buffer, chunk) != PSA_SUCCESS) {
             (void)psa_hash_abort(&hash);
             return EOTA_UPDATE_RESOURCE_FAILURE;
         }
@@ -257,7 +273,8 @@ static eota_result_t hash_partition(const esp_partition_t *partition, uint32_t s
     return EOTA_UPDATE_OK;
 }
 
-static eota_result_t verify_image_size(const esp_partition_t *partition, uint32_t size,
+static eota_result_t verify_image_size(const eota_policy_t *policy,
+                                       const esp_partition_t *partition, uint32_t size,
                                        const eota_http_deadline_t *deadline)
 {
     const esp_partition_pos_t position = {
@@ -269,7 +286,9 @@ static eota_result_t verify_image_size(const esp_partition_t *partition, uint32_
      * image length. The requested prefix can otherwise borrow a valid old
      * tail beyond esp_ota_begin's erased range. Use verified SDK metadata;
      * esp_image_get_metadata omits the signature from its image_len. */
+    if (!flash_io_acquire(policy)) return EOTA_UPDATE_RESOURCE_FAILURE;
     const esp_err_t verified = esp_image_verify(ESP_IMAGE_VERIFY, &position, &metadata);
+    if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     if (deadline != NULL && eota_http_deadline_remaining_us(deadline) <= 0) {
         return EOTA_UPDATE_DOWNLOAD_FAILED;
     }
@@ -392,9 +411,8 @@ eota_result_t eota_retire_inactive(const eota_policy_t *policy,
     uint8_t prefix[EOTA_PREFIX_BYTES];
     uint8_t running_sha256[EOTA_SHA256_BYTES];
     uint32_t running_size = 0;
-    if (esp_partition_read(running, 0, prefix, sizeof prefix) != ESP_OK) {
-        return EOTA_UPDATE_RESOURCE_FAILURE;
-    }
+    eota_result_t read = flash_read_partition(policy, running, 0, prefix, sizeof prefix);
+    if (read != EOTA_UPDATE_OK) return read;
     if (!matches_image_target(policy, prefix)) return EOTA_UPDATE_WRONG_TARGET;
     if (eota_sha256_verified_image(policy, before.running_subtype,
                                    &running_size, running_sha256) != EOTA_UPDATE_OK ||
@@ -405,9 +423,8 @@ eota_result_t eota_retire_inactive(const eota_policy_t *policy,
     const uint32_t expected_running_size = running_size;
 
     uint8_t target_magic = 0;
-    if (esp_partition_read(target, 0, &target_magic, sizeof target_magic) != ESP_OK) {
-        return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
-    }
+    read = flash_read_partition(policy, target, 0, &target_magic, sizeof target_magic);
+    if (read != EOTA_UPDATE_OK) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     /* The caller's durable prewrite receipt authorizes retiring this exact
      * inactive slot. App-side signature rejection alone does not prove the
      * bootloader will refuse the image under every signed-app configuration.
@@ -420,7 +437,8 @@ eota_result_t eota_retire_inactive(const eota_policy_t *policy,
     const bool released = flash_io_release(policy);
     if (erase != ESP_OK || !released) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
 
-    if (esp_partition_read(target, 0, &target_magic, sizeof target_magic) != ESP_OK ||
+    if (flash_read_partition(policy, target, 0, &target_magic,
+                             sizeof target_magic) != EOTA_UPDATE_OK ||
         target_magic != 0xffU) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
 
     eota_slots_t after = {0};
@@ -595,7 +613,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     }
     if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
     uint8_t digest[EOTA_SHA256_BYTES];
-    result = hash_partition(target, image->image_size_bytes, digest, &deadline);
+    result = hash_partition(policy, target, image->image_size_bytes, digest, &deadline);
     if (result != EOTA_UPDATE_OK) goto abort;
     if (memcmp(digest, image->sha256, sizeof digest) != 0) {
         result = EOTA_UPDATE_HASH_MISMATCH;
@@ -613,7 +631,7 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
                EOTA_UPDATE_DOWNLOAD_FAILED;
     }
     if (eota_http_deadline_remaining_us(&deadline) <= 0) return EOTA_UPDATE_DOWNLOAD_FAILED;
-    result = verify_image_size(target, image->image_size_bytes, &deadline);
+    result = verify_image_size(policy, target, image->image_size_bytes, &deadline);
     if (result != EOTA_UPDATE_OK) return result;
     *prepared = (eota_prepared_t){.slots = slots, .image_size_bytes = image->image_size_bytes};
     memcpy(prepared->sha256, image->sha256, sizeof prepared->sha256);
@@ -643,15 +661,14 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
     if (result != EOTA_UPDATE_OK) return result;
     if (!same_slots(&slots, &prepared->slots)) return EOTA_UPDATE_SLOT_UNAVAILABLE;
     uint8_t digest[EOTA_SHA256_BYTES];
-    result = hash_partition(target, prepared->image_size_bytes, digest, NULL);
+    result = hash_partition(policy, target, prepared->image_size_bytes, digest, NULL);
     if (result != EOTA_UPDATE_OK) return result;
     if (memcmp(digest, prepared->sha256, sizeof digest) != 0) return EOTA_UPDATE_HASH_MISMATCH;
     uint8_t prefix[EOTA_PREFIX_BYTES];
-    if (esp_partition_read(target, 0, prefix, sizeof prefix) != ESP_OK) {
-        return EOTA_UPDATE_RESOURCE_FAILURE;
-    }
+    result = flash_read_partition(policy, target, 0, prefix, sizeof prefix);
+    if (result != EOTA_UPDATE_OK) return result;
     if (!matches_image_target(policy, prefix)) return EOTA_UPDATE_WRONG_TARGET;
-    result = verify_image_size(target, prepared->image_size_bytes, NULL);
+    result = verify_image_size(policy, target, prepared->image_size_bytes, NULL);
     if (result != EOTA_UPDATE_OK) return result;
     if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     const esp_err_t select = esp_ota_set_boot_partition(target);
@@ -717,9 +734,9 @@ eota_result_t eota_sha256_running(const eota_policy_t *policy, uint32_t size_byt
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (!expected_slot(running, policy)) return EOTA_UPDATE_SLOT_UNAVAILABLE;
     if (size_bytes > running->size) return EOTA_UPDATE_TOO_LARGE;
-    const eota_result_t result = verify_image_size(running, size_bytes, NULL);
+    const eota_result_t result = verify_image_size(policy, running, size_bytes, NULL);
     if (result != EOTA_UPDATE_OK) return result;
-    return hash_partition(running, size_bytes, digest, NULL);
+    return hash_partition(policy, running, size_bytes, digest, NULL);
 #endif
 }
 
@@ -747,7 +764,9 @@ eota_result_t eota_sha256_verified_image(const eota_policy_t *policy, uint8_t su
         .size = partition->size,
     };
     esp_image_metadata_t metadata = {0};
+    if (!flash_io_acquire(policy)) return EOTA_UPDATE_RESOURCE_FAILURE;
     const esp_err_t verified = esp_image_verify(ESP_IMAGE_VERIFY, &position, &metadata);
+    if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     if (verified != ESP_OK) {
         return verified == ESP_ERR_NO_MEM || verified == ESP_ERR_IMAGE_FLASH_FAIL ?
                EOTA_UPDATE_RESOURCE_FAILURE : EOTA_UPDATE_IMAGE_INVALID;
@@ -756,7 +775,7 @@ eota_result_t eota_sha256_verified_image(const eota_policy_t *policy, uint8_t su
         return EOTA_UPDATE_IMAGE_INVALID;
     }
     uint8_t calculated[EOTA_SHA256_BYTES];
-    const eota_result_t result = hash_partition(partition, metadata.image_len,
+    const eota_result_t result = hash_partition(policy, partition, metadata.image_len,
                                                  calculated, NULL);
     if (result != EOTA_UPDATE_OK) return result;
     memcpy(digest, calculated, sizeof calculated);
