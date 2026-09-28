@@ -9,6 +9,15 @@
 #define EOTA_URL_BYTES 512
 #define EOTA_SHA256_BYTES 32
 
+/* A consumer with other Flash users supplies a short, bounded I/O gate.
+ * Each successful acquire is paired with release before network waits or
+ * progress callbacks. Both callbacks must be present together. */
+typedef struct {
+    bool (*acquire)(void *context);
+    bool (*release)(void *context);
+    void *context;
+} eota_flash_io_t;
+
 typedef enum {
     EOTA_STATE_UNKNOWN,
     EOTA_STATE_UNTRACKED,
@@ -40,6 +49,7 @@ typedef struct {
     uint32_t total_timeout_ms;
     /* Set only after the application has established a trusted clock. */
     bool trusted_time;
+    eota_flash_io_t flash_io;
 } eota_policy_t;
 
 typedef struct {

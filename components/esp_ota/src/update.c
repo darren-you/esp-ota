@@ -57,8 +57,21 @@ static bool valid_policy(const eota_policy_t *policy)
         policy->total_timeout_ms > 3600000 ||
         policy->connect_timeout_ms > policy->total_timeout_ms ||
         policy->read_timeout_ms > policy->idle_timeout_ms ||
-        policy->idle_timeout_ms > policy->total_timeout_ms) return false;
+        policy->idle_timeout_ms > policy->total_timeout_ms ||
+        (policy->flash_io.acquire == NULL) != (policy->flash_io.release == NULL)) return false;
     return true;
+}
+
+static bool flash_io_acquire(const eota_policy_t *policy)
+{
+    return policy->flash_io.acquire == NULL ||
+           policy->flash_io.acquire(policy->flash_io.context);
+}
+
+static bool flash_io_release(const eota_policy_t *policy)
+{
+    return policy->flash_io.release == NULL ||
+           policy->flash_io.release(policy->flash_io.context);
 }
 
 static bool same_partition(const esp_partition_t *a, const esp_partition_t *b)
@@ -400,11 +413,12 @@ eota_result_t eota_retire_inactive(const eota_policy_t *policy,
      * bootloader will refuse the image under every signed-app configuration.
      * Only an erased first image sector (0xff magic) avoids a repeat erase
      * after reset. Invalidate otadata separately and inspect both facts. */
-    if (target_magic != 0xffU &&
-        esp_partition_erase_range(target, 0, target->erase_size) != ESP_OK) {
-        return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
-    }
-    (void)esp_ota_invalidate_inactive_ota_data_slot();
+    if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    const esp_err_t erase = target_magic == 0xffU ? ESP_OK :
+        esp_partition_erase_range(target, 0, target->erase_size);
+    if (erase == ESP_OK) (void)esp_ota_invalidate_inactive_ota_data_slot();
+    const bool released = flash_io_release(policy);
+    if (erase != ESP_OK || !released) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
 
     if (esp_partition_read(target, 0, &target_magic, sizeof target_magic) != ESP_OK ||
         target_magic != 0xffU) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
@@ -518,7 +532,16 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
             memcpy(write_buffer + write_used, buffer, (size_t)count);
             write_used += (size_t)count;
             if (write_used == sizeof write_buffer) {
-                if (esp_ota_write(handle, write_buffer, write_used) != ESP_OK) goto abort;
+                if (!flash_io_acquire(policy)) {
+                    result = EOTA_UPDATE_RESOURCE_FAILURE;
+                    goto abort;
+                }
+                const esp_err_t write = esp_ota_write(handle, write_buffer, write_used);
+                if (!flash_io_release(policy)) {
+                    result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+                    goto abort;
+                }
+                if (write != ESP_OK) goto abort;
                 if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
                 write_used = 0;
             }
@@ -534,8 +557,17 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
              * HTTP body. Let IDF erase one affected sector at each sequential
              * write instead of erasing the whole image in this call; Base can
              * then arbitrate each Flash I/O turn with FRP scratch. */
-            if (esp_ota_begin(target, OTA_WITH_SEQUENTIAL_WRITES, &handle) != ESP_OK) goto abort;
-            ota_started = true;
+            if (!flash_io_acquire(policy)) {
+                result = EOTA_UPDATE_RESOURCE_FAILURE;
+                goto abort;
+            }
+            const esp_err_t begin = esp_ota_begin(target, OTA_WITH_SEQUENTIAL_WRITES, &handle);
+            ota_started = begin == ESP_OK;
+            if (!flash_io_release(policy)) {
+                result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+                goto abort;
+            }
+            if (begin != ESP_OK) goto abort;
             if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
             memcpy(write_buffer, prefix, sizeof prefix);
             write_used = sizeof prefix;
@@ -549,7 +581,18 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     (void)esp_transport_destroy(transport);
     transport = NULL;
     if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
-    if (write_used > 0 && esp_ota_write(handle, write_buffer, write_used) != ESP_OK) goto abort;
+    if (write_used > 0) {
+        if (!flash_io_acquire(policy)) {
+            result = EOTA_UPDATE_RESOURCE_FAILURE;
+            goto abort;
+        }
+        const esp_err_t write = esp_ota_write(handle, write_buffer, write_used);
+        if (!flash_io_release(policy)) {
+            result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+            goto abort;
+        }
+        if (write != ESP_OK) goto abort;
+    }
     if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
     uint8_t digest[EOTA_SHA256_BYTES];
     result = hash_partition(target, image->image_size_bytes, digest, &deadline);
@@ -558,8 +601,13 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
         result = EOTA_UPDATE_HASH_MISMATCH;
         goto abort;
     }
+    if (!flash_io_acquire(policy)) {
+        result = EOTA_UPDATE_RESOURCE_FAILURE;
+        goto abort;
+    }
     const esp_err_t finish = esp_ota_end(handle);
     ota_started = false;
+    if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     if (finish != ESP_OK) {
         return finish == ESP_ERR_OTA_VALIDATE_FAILED ? EOTA_UPDATE_SIGNATURE_INVALID :
                EOTA_UPDATE_DOWNLOAD_FAILED;
@@ -605,7 +653,9 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
     if (!matches_image_target(policy, prefix)) return EOTA_UPDATE_WRONG_TARGET;
     result = verify_image_size(target, prepared->image_size_bytes, NULL);
     if (result != EOTA_UPDATE_OK) return result;
+    if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     const esp_err_t select = esp_ota_set_boot_partition(target);
+    if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     const bool target_selected = same_partition(esp_ota_get_boot_partition(), target);
     if (select == ESP_OK && target_selected && esp_ota_check_rollback_is_possible()) {
         return EOTA_UPDATE_OK;
@@ -613,7 +663,9 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
     /* A failed selector write may have reached otadata even if readback still
      * names the running slot. Restore and inspect both durable slot states. */
     if (!same_partition(esp_ota_get_boot_partition(), running)) {
+        if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
         (void)esp_ota_set_boot_partition(running);
+        if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     }
     if (!same_partition(esp_ota_get_boot_partition(), running)) {
         return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
@@ -625,7 +677,9 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
     if (running_state == ESP_OTA_IMG_NEW) {
         /* ESP-IDF marks a selected app NEW, including the old running app
          * when it is reselected after a failed target selection. */
+        if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
         (void)esp_ota_mark_app_valid_cancel_rollback();
+        if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
         if (esp_ota_get_state_partition(running, &running_state) != ESP_OK ||
             running_state != ESP_OTA_IMG_VALID) {
             return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
@@ -637,7 +691,9 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
     if (esp_ota_get_state_partition(target, &target_state) == ESP_OK &&
         (target_state == ESP_OTA_IMG_NEW || target_state == ESP_OTA_IMG_PENDING_VERIFY)) {
         /* The failed selection left an unbooted candidate in otadata. */
+        if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
         (void)esp_ota_invalidate_inactive_ota_data_slot();
+        if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     }
     eota_slots_t restored_slots;
     if (inspect_slots(policy, prepared->image_size_bytes, &restored_slots,

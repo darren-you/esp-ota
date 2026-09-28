@@ -30,7 +30,7 @@ flowchart LR
 
 准备阶段用 IDF 写 inactive 应用槽并验证完整 signed bin，**不切启动槽**；`esp_ota_begin` 可能清除该槽原有的 otadata 记录。与 Container 联合升级时，调用方先持久登记并读回 OTA 收据，再用 `eota_retire_inactive` 在写新固件前精确退役旧备用镜像，经签名/otadata 读回证明后才退役旧 Container 绑定；中途断电由调用方按原收据重入对账。应用可在两阶段之间持久提交与业务包的绑定；`eota_select` 再核对实际槽、摘要、当前可信产品约束与 IDF 签名，并显式切槽。切槽失败时库恢复旧运行槽的 VALID 状态并清除未启动候选的 NEW 状态，读回不确定则明确报错。库不创建 worker、不写业务 NVS、不管理 Wasm 包，也不替应用决定何时确认新固件。具体调用合同见 [API 说明](docs/design/api-contract.md)。
 
-`eota_prepare` 在已经核对 HTTP 正文长度、槽容量与镜像目标后，使用 IDF 的连续写入模式，使擦除随顺序写入逐扇区发生；完整 signed bin 长度、摘要和 SDK 验签仍按请求的精确值核对。此模式缩短首次 `esp_ota_begin` 的连续擦除范围，但本库尚未把每次 app/otadata Flash 操作接入 Base 与 FRP scratch 共用的短时 I/O 仲裁，不能据此声明 OTA 与最大 FRP 记录可同时推进。
+`eota_prepare` 在已经核对 HTTP 正文长度、槽容量与镜像目标后，使用 IDF 的连续写入模式，使擦除随顺序写入逐扇区发生；完整 signed bin 长度、摘要和 SDK 验签仍按请求的精确值核对。调用方可在可信 policy 中绑定成对的短时 Flash I/O `acquire`／`release`：旧槽退役、`esp_ota_begin`、每次 `esp_ota_write`、`esp_ota_end`、切槽及失败恢复中的 app/otadata 写调用均单独仲裁，HTTPS 等待和进度回调期间不持有短 claim。库只执行调用方提供的门，不自行取得产品收据或 FRP scratch lease；pending 确认、调用方 NVS 及实体 Flash 时延仍须由 Base 独立接线和实测。
 
 旧备用镜像首次擦除前，调用方还须用 `eota_validate_image_request` 静态检查新请求的 HTTPS URL 和最小镜像头长度。`eota_prepare` 复用这一检查；槽预检仍单独核对可信 policy、实际状态和分区容量。
 
