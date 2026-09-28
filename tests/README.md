@@ -25,6 +25,8 @@ flowchart LR
 
 `update_test` 与 `update_esp32` 分别用官方芯片 ID `0x0005` 和 `0x0000` 编译相同真实更新源码与完整故障矩阵，检查零值 ESP32 ID 可通过预检、无效哨兵 `0xffff` 被拒。selector 假件按固定 IDF 语义把每次 `esp_ota_set_boot_partition` 的新 active 状态置为 NEW：验证目标已切换与 boot 仍指旧槽两种返回失败路径；恢复旧槽时重置为 VALID、清除未启动候选的 NEW 记录、预检可再次通过；恢复状态或清除记录失败则报告 boot 状态不确定。另用同一份已准备镜像在选槽前切换项目名、芯片 ID 与 SDK 镜像头约束，要求不进入 boot selector。它还在槽预检、擦除、写入、HTTP 清理、分区读回和验签调用中推进假单调时钟，验证逾期后不再产出准备结果或执行切槽；槽预检耗尽总期限时不得创建网络客户端或写 Flash。`ota_test` 验证 UNTRACKED 状态不能冒充已确认的 pending 镜像。
 
+`update_test` 还要求 `eota_prepare` 用 SDK 的 `OTA_WITH_SEQUENTIAL_WRITES` 启动 app 写入。固定 SDK 在该模式下由各次 `esp_ota_write` 按受影响扇区擦除；假件验证调用模式和现有完整长度、摘要、失败清理合同，但不模拟实体 Flash 的单次耗时或与 FRP scratch 的仲裁。
+
 静态镜像请求回归在同一 C3/ESP32 假件中验证：`eota_preflight` 可接受的 1 字节请求被公开校验入口拒绝，刚好容纳镜像头的长度获准；HTTPS URL 的协议、非空主机、方括号主机、可选端口、凭据、片段、空格与 512 字节边界按生产规则检查。`eota_prepare` 对相同坏请求在网络与擦写前拒绝。
 
 准备收据回归先完成一次 `eota_prepare`，再用同一输出对象依次传入无可信时间、无效产品策略和空镜像请求；三个失败入口都必须清空旧收据，且不能重新触发 HTTP 初始化或 Flash 写入。这项测试直接编译 C3 与 ESP32 共用的真实 `update.c`，不证明设备端持久收据和跨启动对账。

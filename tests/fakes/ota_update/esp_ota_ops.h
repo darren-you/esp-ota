@@ -15,6 +15,7 @@ typedef enum {
     ESP_OTA_IMG_UNDEFINED = 0xFFFFFFFFU,
 } esp_ota_img_states_t;
 #define ESP_ERR_OTA_VALIDATE_FAILED 0x1503
+#define OTA_WITH_SEQUENTIAL_WRITES 0xfffffffeU
 const esp_partition_t *esp_ota_get_running_partition(void);
 const esp_partition_t *esp_ota_get_boot_partition(void);
 const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *partition);

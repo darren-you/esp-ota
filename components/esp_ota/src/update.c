@@ -530,7 +530,11 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
                 result = EOTA_UPDATE_WRONG_TARGET;
                 goto abort;
             }
-            if (esp_ota_begin(target, image->image_size_bytes, &handle) != ESP_OK) goto abort;
+            /* The image length was already checked against the exact slot and
+             * HTTP body. Let IDF erase one affected sector at each sequential
+             * write instead of erasing the whole image in this call; Base can
+             * then arbitrate each Flash I/O turn with FRP scratch. */
+            if (esp_ota_begin(target, OTA_WITH_SEQUENTIAL_WRITES, &handle) != ESP_OK) goto abort;
             ota_started = true;
             if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
             memcpy(write_buffer, prefix, sizeof prefix);

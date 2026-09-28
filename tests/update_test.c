@@ -270,7 +270,7 @@ esp_err_t esp_ota_check_image_validity(int type, const esp_image_header_t *heade
 }
 esp_err_t esp_ota_begin(const esp_partition_t *partition, size_t size, esp_ota_handle_t *handle)
 {
-    assert(partition == &new_slot && size == IMAGE_BYTES && staged_size == 0);
+    assert(partition == &new_slot && size == OTA_WITH_SEQUENTIAL_WRITES && staged_size == 0);
     ++begin_calls;
     advance_time(begin_advance_us);
     *handle = 1;

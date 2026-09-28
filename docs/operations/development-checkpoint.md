@@ -175,3 +175,11 @@ AppleClang ASan/UBSan 对直接编译 `update.c` 的 C3/ESP32 故障矩阵及其
 另外使用仓外**无效网络占位输入**打开样例的 OTA 编译路径：C3 RSA v2 app 为 `0x111000` 字节、SHA-256 `5608c2ade23db90aeb20ae0f6303482f3e181951a0aa6f70f86cff51fccea25a`，旧 `0x1e0000` 槽剩 `0xcf000`；ESP32 ECDSA v1 app 为 `0xffff4` 字节、SHA-256 `58fb2c8f8d99938901a0c652cd4c88c5ead6d7273978c41f0e4e13bb69a79df3`，旧 `0x180000` 槽剩 `0x8000c`。官方 `espsecure` 对两个 app 都验签通过，两个 ELF 都实际链接 `eota_prepare`、`eota_select`、`eota_confirm_pending` 和 `transport_read`。C3 此构建表前 3072 字节仍与原板表相同。占位 SSID、密码和 `example.invalid` URL 不能让设备完成联网或下载；本结果只证明当前源码的完整路径能够编译、链接并放入原应用槽。
 
 ESP32 生成的**未签名**分区表前 3072 字节与该板旧 AT 恢复件同位置逐字节一致。固定 SDK 对分区表继续追加 ECDSA v1 签名块，使最终文件由 3072 变为 3140 字节；官方 `espsecure verify-signature --version 1 --keyfile` 对该表通过。该最终文件与旧板原有 4 KiB 分区表扇区并非逐字节相同，故不能以签名表替换旧表或据此声称旧 bootloader 已兼容。当前候选没有烧写 bootloader、分区表或 app，没有打开两板串口，也没有使用真实 Wi-Fi、HTTPS 镜像服务、生产签名材料或 eFuse。默认样例未武装；启用路径构建只使用无效网络输入，均未在设备调用 `eota_prepare`。P5-04/P5-05 的持续签名运行、完整 HTTPS/Flash/bootloader、回退及恢复验收仍未完成。
+
+## OTA 连续写入扇区擦除软件检查点（2026-09-29）
+
+固定 ESP-IDF `578cf89c343e388db43ba1f4ddcd602fedcb763c` 的 `esp_ota_begin(target, image_size, ...)` 在开始下载正文时一次擦除对齐后的整份镜像范围；这一步会占用 Flash，不能拆成 Base 与 FRP scratch 的短时 I/O 操作。同一 SDK 的 `OTA_WITH_SEQUENTIAL_WRITES` 使 `esp_ota_begin` 不做整份擦除，后续每次 `esp_ota_write` 只擦本次写入跨越的扇区。`eota_prepare` 已在独立核对可信槽、HTTP Content-Length 与镜像头后切到该模式，仍按请求精确长度计算完整 signed bin 摘要、调用 SDK 验签并阻止超槽或附加尾缀。
+
+当前源码的 AppleClang ASan/UBSan 加固定 SDK mbedTLS 4.1 真实 HTTPS 回环 CTest **6/6** 通过；C3 与 ESP32 两套直接编译生产 `update.c` 的假件均断言连续写入模式。SDK 锁检查通过。仓外无效网络占位输入和仅用于离线构建的临时测试键，分别产出 C3 RSA v2 `0x111000` B、SHA-256 `ae7667e0e13c503ef4d9416271aa24572bd3d1272b54ede2108deb181fe3916f`，以及 ESP32 ECDSA v1 `0xffff4` B、SHA-256 `c425a9713599cf9a341d6b27bef79d9f8628a18f0670d7ed26e7b225c803322a`；官方 `espsecure verify-signature` 两目标均通过，两个 ELF 均含 `eota_prepare`、`eota_select` 与 SDK `esp_ota_begin`。ESP32 使用仓外旧 AT 几何仅供签名链接，首次因先前默认构建的 sdkconfig 保留通用分区设置而被构建门拒绝；改用隔离 `SDKCONFIG` 后才取得上述结果。
+
+这只移除 OTA 准备阶段一次性整镜像擦除。OTA app/otadata 写入与读取、Base NVS/Container 包区、FRP scratch 尚未全部使用同一短时 I/O 仲裁；SDK 的单次写入、验签及清理调用也不能由本库抢占。没有运行该镜像、写设备或实测 FRP 大记录并存、Flash 延迟与耐久；P5-04、P6-03、P4-05 和 P7 的对应验收不因此关闭。
