@@ -1,5 +1,9 @@
 # ESP OTA 开发检查点
 
+## 2026-10-01 源仓整合
+
+隔离产品链候选整合源仓 `8edd54f46b0bf9f92fe1ff468aa67ad0ea41d74e`。保留候选的请求静态校验、旧槽退役、准备收据清零与短 Flash I/O 仲裁说明；全部非文档执行输入逐项 Git blob／子模块指针与整合前 `04acb5e80a744649f8442607fb8d901d30880ca0` 相同，没有代码或工具链锁变化。此次只收敛分支历史与文档，未重新执行设备升级，也不扩大既有 host 或签名构建结果的范围。
+
 2026-09-29 P6-03 槽状态读取仲裁续进：`eota_observe_slots`、预检和退役中的运行／boot／目标槽查询及 otadata 状态读取现在持有同一 Flash I/O claim；切槽后的 boot selector、回退资格与故障恢复状态读回也逐次获取。获取失败时退役入口保留资源错误，不能误报确定性槽不可用。双目标 AppleClang ASan/UBSan host CTest 5/5 通过，SDK 假件断言查询持锁并覆盖首读、begin、write 分别拒绝及释放失败。固定 SDK 的 C3 RSA v2／ESP32 ECDSA v1 仓外测试键签名样例重新编译并经官方验签，镜像分别 `0x111000`／`0xffff4` B；Base 精确消费待本次提交后解析。SDK 的回退资格查询可能验整镜像，最大占用和 FRP scratch 同机进展尚无实测，本轮未写实体设备。
 
 2026-09-29 P6-03 显式镜像读取接线：`eota_prepare`／`select`／退役及运行镜像身份核对中的 `esp_partition_read` 每次先取得调用方 Flash I/O claim，单次最多读取 1024 字节，释放后才执行 PSA 摘要计算；`esp_image_verify` 在整次 SDK 调用期间持有 claim。获取失败不读取，释放失败返回状态不明。AppleClang ASan/UBSan 双目标 host CTest 5/5 通过，假件逐次断言读取和验签持有 gate，并覆盖获取拒绝及读取后释放失败。固定 SDK 的 C3 RSA v2 与 ESP32 ECDSA v1 仓外测试键签名样例重新编译并经官方验签，镜像分别为 `0x111000`／`0xffff4` B。槽状态观察与 SDK 验签调用的实际最长占用尚未测量，不能据此认定最大 FRP 记录同机活性或 P4-05/P6-03/P7 已验收；本轮未写实体设备。
