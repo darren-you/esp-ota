@@ -3,7 +3,8 @@
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_image_format.h"
-#include "http_transport.h"
+#include "eota_http_transport.h"
+#include "http_deadline.h"
 #include "esp_timer.h"
 #include "esp_ota_ops.h"
 #include "psa/crypto.h"
@@ -387,8 +388,9 @@ esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *co
     return (void *)1;
 }
 esp_transport_handle_t eota_http_transport_create(eota_http_deadline_t *deadline,
-                                                   uint32_t connect_timeout_ms)
+                                                   uint32_t connect_timeout_ms, bool trusted_time)
 {
+    assert(trusted_time);
     assert(deadline && deadline->started_us == now_us &&
            deadline->last_progress_us == now_us &&
            deadline->total_timeout_ms == policy.total_timeout_ms &&

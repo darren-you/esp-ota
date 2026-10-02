@@ -1,4 +1,9 @@
-#include "http_transport.h"
+#include "eota_http_transport.h"
+#include "mbedtls/build_info.h"
+
+#ifndef MBEDTLS_HAVE_TIME_DATE
+#error "The real HTTPS test requires actual mbedTLS certificate date validation"
+#endif
 
 #include <assert.h>
 #include <arpa/inet.h>
@@ -107,7 +112,7 @@ int main(int argc, char **argv)
     eota_http_deadline_t deadline;
     assert(eota_http_deadline_init(&deadline, total_ms, idle_ms));
     const int64_t started_us = deadline.started_us;
-    esp_transport_handle_t transport = eota_http_transport_create(&deadline, total_ms);
+    esp_transport_handle_t transport = eota_http_transport_create(&deadline, total_ms, true);
     assert(transport);
 
     const char *stage = "connect";

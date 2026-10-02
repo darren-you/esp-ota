@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "eota.h"
-#include "http_deadline.h"
-#include "http_transport.h"
+#include "eota_http_transport.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -532,7 +531,8 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     esp_transport_handle_t transport = NULL;
     esp_http_client_handle_t client = NULL;
     result = EOTA_UPDATE_RESOURCE_FAILURE;
-    transport = eota_http_transport_create(&deadline, policy->connect_timeout_ms);
+    transport = eota_http_transport_create(&deadline, policy->connect_timeout_ms,
+                                             policy->trusted_time);
     if (transport == NULL) goto abort;
     const esp_http_client_config_t http = {
         .url = image->image_url,

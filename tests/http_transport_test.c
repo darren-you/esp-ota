@@ -49,7 +49,7 @@ static void sleep_ms(long ms)
     (void)nanosleep(&pause, NULL);
 }
 
-#include "http_transport.h"
+#include "eota_http_transport.h"
 #include <stdint.h>
 #include "esp_transport.h"
 #include "freertos/semphr.h"
@@ -225,7 +225,7 @@ static void run_case(const char *name,int port,int total_ms,int connect_ms,int e
     }
     eota_http_deadline_t deadline; assert(eota_http_deadline_init(&deadline,total_ms,total_ms));
     int64_t start=deadline.started_us;
-    esp_transport_handle_t transport=eota_http_transport_create(&deadline,connect_ms);assert(transport);
+    esp_transport_handle_t transport=eota_http_transport_create(&deadline, connect_ms, true);assert(transport);
     int connected=transport->connect(transport,name,port,1000);
     assert((connected==0)==expected_connect);
     if(connected<0 && mode==TLS_SLOW_HANDSHAKE) {
@@ -272,7 +272,7 @@ static void test_read_result_contract(void) {
     pthread_t thread;assert(pthread_create(&thread,NULL,serve,&server)==0);
     atomic_store(&tls_mode,TLS_NORMAL);
     eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline,500,300));
-    esp_transport_handle_t transport=eota_http_transport_create(&deadline,150);
+    esp_transport_handle_t transport=eota_http_transport_create(&deadline, 150, true);
     assert(transport && transport->connect(transport,"localhost",port,150)==0);
     char byte;
     /* A per-read timeout must remain retryable until the idle deadline. */
@@ -291,7 +291,7 @@ static void test_absolute_read_deadline(int total_ms,int idle_ms) {
     server.listener=listen_loopback(&port);
     pthread_t thread;assert(pthread_create(&thread,NULL,serve,&server)==0);
     eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline,total_ms,idle_ms));
-    esp_transport_handle_t transport=eota_http_transport_create(&deadline,100);
+    esp_transport_handle_t transport=eota_http_transport_create(&deadline, 100, true);
     assert(transport && transport->connect(transport,"localhost",port,100)==0);
     simulate_clock();
     assert(eota_http_deadline_init(&deadline,total_ms,idle_ms));
@@ -318,7 +318,7 @@ static void test_single_read_deadline_across_slow_tls_record(void) {
     pthread_t thread;assert(pthread_create(&thread,NULL,serve,&server)==0);
     atomic_store(&tls_mode,TLS_SLOW_RECORD);
     eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline,800,400));
-    esp_transport_handle_t transport=eota_http_transport_create(&deadline,100);
+    esp_transport_handle_t transport=eota_http_transport_create(&deadline, 100, true);
     assert(transport && transport->connect(transport,"localhost",port,100)==0);
     wait_reply(&reply_ready);
     simulate_clock();
@@ -348,7 +348,7 @@ static void test_single_read_deadline_across_tickets(void) {
     pthread_t thread;assert(pthread_create(&thread,NULL,serve,&server)==0);
     atomic_store(&tls_mode,TLS_NORMAL);
     eota_http_deadline_t deadline;assert(eota_http_deadline_init(&deadline,800,800));
-    esp_transport_handle_t transport=eota_http_transport_create(&deadline,100);
+    esp_transport_handle_t transport=eota_http_transport_create(&deadline, 100, true);
     assert(transport && transport->connect(transport,"localhost",port,100)==0);
     wait_reply(&reply_ready);
     simulate_clock();
@@ -367,7 +367,49 @@ static void test_single_read_deadline_across_tickets(void) {
     assert(esp_transport_destroy(transport)==ESP_OK);
     pthread_join(thread,NULL);close(server.listener);
 }
+static void test_public_factory_admission(void) {
+    simulate_clock();
+    eota_http_deadline_t deadline;
+    assert(eota_http_deadline_init(&deadline, 500, 300));
+    const eota_http_deadline_t original = deadline;
+    const int lookups = atomic_load(&dns_lookup_count);
+    const int bundles = atomic_load(&bundle_attach_count);
+    assert(eota_http_transport_create(NULL, 100, true) == NULL);
+    assert(eota_http_transport_create(&deadline, 100, false) == NULL);
+    assert(eota_http_transport_create(&deadline, 0, true) == NULL);
+    deadline.started_us = -1;
+    assert(eota_http_transport_create(&deadline, 100, true) == NULL);
+    deadline = original;
+    deadline.last_progress_us = deadline.started_us - 1;
+    assert(eota_http_transport_create(&deadline, 100, true) == NULL);
+    deadline = original;
+    deadline.total_timeout_ms = 0;
+    assert(eota_http_transport_create(&deadline, 100, true) == NULL);
+    deadline = original;
+    deadline.idle_timeout_ms = 0;
+    assert(eota_http_transport_create(&deadline, 100, true) == NULL);
+    deadline = original;
+    deadline.last_progress_us = esp_timer_get_time() + 1;
+    assert(eota_http_transport_create(&deadline, 100, true) == NULL);
+    deadline = original;
+    advance_clock(300000);
+    assert(eota_http_transport_create(&deadline, 100, true) == NULL);
+    assert(atomic_load(&dns_lookup_count) == lookups);
+    assert(atomic_load(&bundle_attach_count) == bundles);
+    restore_clock();
+}
+
 int main(void) {
+#if defined(EOTA_TEST_NO_TIME_DATE) || defined(EOTA_TEST_NO_CERTIFICATE_BUNDLE)
+    eota_http_deadline_t unsupported;
+    assert(eota_http_deadline_init(&unsupported, 500, 300));
+    assert(eota_http_transport_create(&unsupported, 100, true) == NULL);
+    assert(atomic_load(&dns_lookup_count) == 0);
+    assert(atomic_load(&bundle_attach_count) == 0);
+    puts("  public transport rejects missing certificate/date verification support");
+    return 0;
+#endif
+    test_public_factory_admission();
     signal(SIGPIPE,SIG_IGN);
     int port;atomic_store(&dns_delay_ms,180);
     run_case("dns-hang",443,500,60,0,TLS_NORMAL,0);

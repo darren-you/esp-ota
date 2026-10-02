@@ -34,6 +34,8 @@ flowchart LR
 
 旧备用镜像首次擦除前，调用方还须用 `eota_validate_image_request` 静态检查新请求的 HTTPS URL 和最小镜像头长度。`eota_prepare` 复用这一检查；槽预检仍单独核对可信 policy、实际状态和分区容量。
 
+公开 `include/eota_http_transport.h` 现在允许其他 HTTPS 消费者复用既有期限与 DNS／TCP／TLS 机制，调用方保有期限对象并按 HTTP cleanup、transport destroy、owner release 顺序回收；固件与产品包策略仍分别由原调用方负责。接口与验证边界见[API 说明](docs/design/api-contract.md#共享-https-传输机制)及[共享期限检查点](docs/operations/shared_http_deadline_checkpoint.md)。
+
 ## 独立构建
 
 本仓不需要相邻 Base、FRP、MQTT、Container 或私有 Tool 才能运行 host 回归：

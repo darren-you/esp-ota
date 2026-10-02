@@ -34,6 +34,7 @@ add_executable(eota_real_https_client
 target_include_directories(eota_real_https_client PRIVATE
     "${EOTA_IDF_MBEDTLS}/mbedtls/include"
     "${EOTA_IDF_MBEDTLS}/mbedtls/tf-psa-crypto/include"
+    ${CMAKE_SOURCE_DIR}/components/esp_ota/include
     ${CMAKE_SOURCE_DIR}/components/esp_ota/src
     ${CMAKE_SOURCE_DIR}/tests/fakes/transport
     ${CMAKE_SOURCE_DIR}/tests/fakes/ota_update

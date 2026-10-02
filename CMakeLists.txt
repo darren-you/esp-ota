@@ -21,7 +21,8 @@ if(BUILD_TESTING)
     find_package(Threads REQUIRED)
     add_executable(eota_http_deadline_test components/esp_ota/src/http_deadline.c
         tests/http_deadline_test.c)
-    target_include_directories(eota_http_deadline_test PRIVATE components/esp_ota/src
+    target_include_directories(eota_http_deadline_test PRIVATE components/esp_ota/include
+        components/esp_ota/src
         tests/fakes/ota_update tests/fakes)
     target_compile_options(eota_http_deadline_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
     add_test(NAME http_deadline COMMAND eota_http_deadline_test)
@@ -36,10 +37,26 @@ if(BUILD_TESTING)
         components/esp_ota/src/http_deadline.c
         tests/http_transport_test.c)
     target_include_directories(eota_http_transport_test PRIVATE
-        components/esp_ota/src tests/fakes/transport tests/fakes/ota_update tests/fakes)
+        components/esp_ota/include components/esp_ota/src tests/fakes/transport tests/fakes/ota_update tests/fakes)
     target_compile_options(eota_http_transport_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
     target_link_libraries(eota_http_transport_test PRIVATE Threads::Threads)
     add_test(NAME http_transport COMMAND eota_http_transport_test)
+
+    foreach(guard time_date certificate_bundle)
+        string(TOUPPER "${guard}" guard_macro)
+        add_executable(eota_http_no_${guard}_test
+            components/esp_ota/src/http_transport.c
+            components/esp_ota/src/http_deadline.c tests/http_transport_test.c)
+        target_include_directories(eota_http_no_${guard}_test PRIVATE
+            components/esp_ota/include components/esp_ota/src
+            tests/fakes/transport tests/fakes/ota_update tests/fakes)
+        target_compile_definitions(eota_http_no_${guard}_test PRIVATE
+            EOTA_TEST_NO_${guard_macro}=1)
+        target_compile_options(eota_http_no_${guard}_test PRIVATE
+            -Wall -Wextra -Werror -UNDEBUG)
+        target_link_libraries(eota_http_no_${guard}_test PRIVATE Threads::Threads)
+        add_test(NAME http_no_${guard} COMMAND eota_http_no_${guard}_test)
+    endforeach()
 
     if(EOTA_REAL_HTTPS_TEST)
         add_subdirectory(tests/native-tls)

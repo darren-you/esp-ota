@@ -23,3 +23,11 @@ IDF v6.1 的 HTTP header、发送与响应体方法都可能在单次调用内�
 总期限从 `eota_prepare` 的槽预检前开始；无进展期限由 DNS 解析完成、TCP 连接完成及实际收发的网络字节刷新；DNS、TCP、TLS、请求发送、响应头和响应体共用这两项绝对期限，连接阶段另受 `connect_timeout_ms` 约束。单调时钟是唯一的期限事实，不创建到期定时器；DNS 每 tick 检查一次。单次 TLS 读写以 SDK 传入的 `read_timeout_ms` 建立绝对截止；该截止覆盖同一 TLS 记录的多次非阻塞收发，也覆盖 TLS 1.3 连续返回会话票据而尚未交付应用数据的循环，`select` 等待取它与总期限、无进展期限的最短剩余时间。进展必须先通过旧期限检查，逾期结果或字节不能续期；单次 TLS 密码学步骤若恰在读写截止后产出明文，传输先交还已消费的数据，以免丢失记录，并在下一步重新检查总期限。DNS 迟到回调由独立引用持有上下文，至多保留一个未完成解析。HTTP 返回后由同步调用方清理 client，再销毁 custom transport 并关闭 socket。
 
 这些期限约束正常调度下的网络等待和每次调用的返回边界。准备阶段在 `esp_ota_begin/write/end`、分区读回和 HTTP 清理返回后继续检查下载期限；逾期不产出 `eota_prepared_t`，调用方不得切槽。固定 lwIP 的 `socket`/`close` 可能同步等待 TCP/IP 线程；mBed TLS 单次密码学步骤、已缓存记录解析、HTTP 解析、Flash 操作及验签不能被本库抢占。库因此不承诺 30 秒无进展或 5 分钟总期限就是 `eota_prepare` 的严格墙钟返回上界。真实 HTTPS 的 CA、SNI、证书名与长期慢滴流尚无实板运行证据；主计划 P5-04 仍未验收。
+
+## 共享 HTTPS 传输机制
+
+`include/eota_http_transport.h` 公开既有 `eota_http_deadline_t`、`eota_http_deadline_init`、`eota_http_deadline_remaining_us` 与 `eota_http_transport_create(deadline, connect_timeout_ms, trusted_time)`。其他 HTTP 消费者可以使用同一 DNS／TCP／TLS 机制；`eota.h` 的固件升级策略保持独立，接口不规定包格式、授权、Flash 或持久化。网络进展与指定时刻查询仍为 `src/http_deadline.h` 私有操作。调用方只在第一次传输前初始化期限，随后不得改写或刷新；期限对象须存活到唯一 transport 销毁后。
+
+工厂拒绝没有本次启动可信时间、已过期或无效期限、零连接预算，以及缺少证书日期校验或默认 CA bundle 的构建。TLS 继续使用 `VERIFY_REQUIRED` 和 URL 原主机名的 SNI／证书名；共享接口没有自定义 CA、跳过验证或重连入口。单次使用的 HTTP client 只借用 custom transport。固定 SDK 对任意有效非空 client 的 cleanup 都会 close／释放自身并返回成功，随后由调用方销毁 transport，最后释放期限 owner；`close` 本身不销毁本机制的 socket／TLS。DNS 超时后的迟到回调只持有独立 DNS 上下文，不持有调用方期限对象。
+
+网络等待仍采用本节前述绝对期限与单次调用预算；本接口没有新增外部取消请求或计时器，不承诺抢占密码学单步、HTTP 解析、SDK cleanup／socket close 或 Flash 调用。调用方的业务取消与产品回收继续由原 owner 实施。

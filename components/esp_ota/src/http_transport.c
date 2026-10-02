@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "http_transport.h"
+#include "eota_http_transport.h"
+#include "http_deadline.h"
+#include "sdkconfig.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -382,7 +384,7 @@ static int transport_poll_write(esp_transport_handle_t handle, int timeout_ms)
 static int transport_close(esp_transport_handle_t handle)
 {
     (void)handle;
-    /* This OTA transport is single-use. HTTP may call close on an error while
+    /* This HTTPS transport is single-use. HTTP may call close on an error while
      * unwinding; its owner releases the socket in transport_destroy. */
     return 0;
 }
@@ -402,9 +404,15 @@ static int transport_destroy(esp_transport_handle_t handle)
 }
 
 esp_transport_handle_t eota_http_transport_create(eota_http_deadline_t *deadline,
-                                                   uint32_t connect_timeout_ms)
+                                                   uint32_t connect_timeout_ms, bool trusted_time)
 {
-    if (deadline == NULL || connect_timeout_ms == 0 ||
+#if !defined(CONFIG_MBEDTLS_HAVE_TIME_DATE) || !defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)
+    return NULL;
+#endif
+    if (!trusted_time || deadline == NULL || deadline->started_us < 0 ||
+        deadline->last_progress_us < deadline->started_us ||
+        deadline->total_timeout_ms == 0 || deadline->idle_timeout_ms == 0 ||
+        connect_timeout_ms == 0 ||
         eota_http_deadline_remaining_us(deadline) <= 0) return NULL;
     esp_transport_handle_t handle = esp_transport_init();
     if (handle == NULL) return NULL;
