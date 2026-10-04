@@ -89,6 +89,7 @@ static bool connect_network(void)
     if (esp_wifi_init(&init) != ESP_OK ||
         esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL) != ESP_OK ||
         esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL) != ESP_OK) return false;
+    if (esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK) return false;
     wifi_config_t config = {0};
     memcpy(config.sta.ssid, EOTA_LAB_WIFI_SSID, ssid_size);
     memcpy(config.sta.password, EOTA_LAB_WIFI_PASSWORD, password_size);
