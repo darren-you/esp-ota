@@ -34,7 +34,7 @@ flowchart LR
 
 旧备用镜像首次擦除前，调用方还须用 `eota_validate_image_request` 静态检查新请求的 HTTPS URL 和最小镜像头长度。`eota_prepare` 复用这一检查；槽预检仍单独核对可信 policy、实际状态和分区容量。
 
-公开 `include/eota_http_transport.h` 现在允许其他 HTTPS 消费者复用既有期限与 DNS／TCP／TLS 机制，调用方保有期限对象并按 HTTP cleanup、transport destroy、owner release 顺序回收；固件与产品包策略仍分别由原调用方负责。接口与验证边界见[API 说明](docs/design/api-contract.md#共享-https-传输机制)及[共享期限检查点](docs/operations/shared_http_deadline_checkpoint.md)。
+公开 `include/eota_http_transport.h` 现在允许其他 HTTPS 消费者复用既有期限与 DNS／TCP／TLS 机制，调用方保有期限对象并按 HTTP cleanup、transport destroy、owner release 顺序回收；固件与产品包策略仍分别由原调用方负责。接口与验证边界见[API 说明](docs/design/api-contract.md#共享-https-传输机制)及[共享期限检查点](docs/operations/shared-http-deadline-checkpoint.md)。
 
 ## 独立构建
 
@@ -74,6 +74,6 @@ idf.py -C examples/esp32 -B build-esp32 build
 
 源码与测试从 Base 已提交源码迁入的来源和改造边界见[来源记录](docs/design/source-provenance.md)。工作区完整阶段与验收条件以[五仓主计划](https://github.com/darren-you/darren-space/blob/master/harness/docs/design/darren-space/global/esp-base-frp-mqtt-ota-container-development-plan.md)为准。
 本轮编译与 host 测试的精确结果见[开发检查点](docs/operations/development-checkpoint.md)。
-共用样例显式使用 RAM Wi-Fi 存储；本轮武装离线构建与真实链接复核见[样例检查点](docs/operations/ram_wifi_sample_checkpoint.md)。
+共用样例显式使用 RAM Wi-Fi 存储；本轮武装离线构建与真实链接复核见[样例检查点](docs/operations/ram-wifi-sample-checkpoint.md)。
 
 当前双目标离线构建与验签结果见[开发检查点](docs/operations/development-checkpoint.md)；C3 的历史签名验证见 [P5-03 签名构建复验](docs/verification/p5-03-signed-c3.md)。
