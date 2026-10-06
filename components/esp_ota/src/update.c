@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "eota.h"
 #include "eota_http_transport.h"
+#include "http_deadline.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -360,6 +361,18 @@ eota_result_t eota_validate_image_request(const eota_image_t *image)
 #endif
 }
 
+eota_result_t eota_validate_stream_request(const eota_stream_t *stream)
+{
+#if !EOTA_SIGNED_ENABLED
+    (void)stream;
+    return EOTA_UPDATE_UNSUPPORTED;
+#else
+    return stream != NULL && stream->read != NULL &&
+           stream->image_size_bytes >= EOTA_PREFIX_BYTES ?
+           EOTA_UPDATE_OK : EOTA_UPDATE_INVALID_REQUEST;
+#endif
+}
+
 const char *eota_error(eota_result_t result)
 {
     switch (result) {
@@ -505,6 +518,201 @@ eota_result_t eota_retire_inactive(const eota_policy_t *policy,
 #endif
 }
 
+#if EOTA_SIGNED_ENABLED
+typedef struct {
+    int (*read)(void *context, uint8_t *buffer, size_t capacity);
+    bool (*finish)(void *context);
+    void *context;
+} eota_input_t;
+
+static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_size_bytes,
+                                   const uint8_t sha256[EOTA_SHA256_BYTES],
+                                   eota_http_deadline_t *deadline, const eota_slots_t *slots,
+                                   const esp_partition_t *target, const eota_input_t *input,
+                                   eota_progress_t progress, void *context,
+                                   eota_prepared_t *prepared)
+{
+    esp_ota_handle_t handle = 0;
+    bool ota_started = false;
+    eota_result_t result = EOTA_UPDATE_DOWNLOAD_FAILED;
+    uint8_t buffer[EOTA_READ_BYTES];
+    uint8_t prefix[EOTA_PREFIX_BYTES];
+    uint8_t write_buffer[1024];
+    size_t write_used = 0;
+    uint32_t received = 0;
+    while (received < image_size_bytes) {
+        if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
+        const uint32_t left = image_size_bytes - received;
+        size_t wanted = left < sizeof buffer ? left : sizeof buffer;
+        if (received < sizeof prefix && wanted > sizeof prefix - received) {
+            wanted = sizeof prefix - received;
+        } else if (received >= sizeof prefix && wanted > sizeof write_buffer - write_used) {
+            wanted = sizeof write_buffer - write_used;
+        }
+        const int count = input->read(input->context, buffer, wanted);
+        if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
+        if (count == EOTA_STREAM_READ_TIMEOUT) continue;
+        if (count <= 0 || (size_t)count > wanted) goto abort;
+        if (received < sizeof prefix) {
+            memcpy(prefix + received, buffer, (size_t)count);
+        } else {
+            memcpy(write_buffer + write_used, buffer, (size_t)count);
+            write_used += (size_t)count;
+            if (write_used == sizeof write_buffer) {
+                if (!flash_io_acquire(policy)) {
+                    result = EOTA_UPDATE_RESOURCE_FAILURE;
+                    goto abort;
+                }
+                const esp_err_t write = esp_ota_write(handle, write_buffer, write_used);
+                if (!flash_io_release(policy)) {
+                    result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+                    goto abort;
+                }
+                if (write != ESP_OK) goto abort;
+                if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
+                write_used = 0;
+            }
+        }
+        received += (uint32_t)count;
+        if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
+        if (received == sizeof prefix) {
+            if (!matches_image_target(policy, prefix)) {
+                result = EOTA_UPDATE_WRONG_TARGET;
+                goto abort;
+            }
+            /* The image length was already checked against the exact slot and
+             * input metadata. Let IDF erase one affected sector at each sequential
+             * write instead of erasing the whole image in this call; Base can
+             * then arbitrate each Flash I/O turn with FRP scratch. */
+            if (!flash_io_acquire(policy)) {
+                result = EOTA_UPDATE_RESOURCE_FAILURE;
+                goto abort;
+            }
+            const esp_err_t begin = esp_ota_begin(target, OTA_WITH_SEQUENTIAL_WRITES, &handle);
+            ota_started = begin == ESP_OK;
+            if (!flash_io_release(policy)) {
+                result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+                goto abort;
+            }
+            if (begin != ESP_OK) goto abort;
+            if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
+            memcpy(write_buffer, prefix, sizeof prefix);
+            write_used = sizeof prefix;
+        }
+        if (progress != NULL) progress(received, image_size_bytes, context);
+    }
+    if (!input->finish(input->context) ||
+        eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
+    if (write_used > 0) {
+        if (!flash_io_acquire(policy)) {
+            result = EOTA_UPDATE_RESOURCE_FAILURE;
+            goto abort;
+        }
+        const esp_err_t write = esp_ota_write(handle, write_buffer, write_used);
+        if (!flash_io_release(policy)) {
+            result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+            goto abort;
+        }
+        if (write != ESP_OK) goto abort;
+    }
+    if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
+    uint8_t digest[EOTA_SHA256_BYTES];
+    result = hash_partition(policy, target, image_size_bytes, digest, deadline);
+    if (result != EOTA_UPDATE_OK) goto abort;
+    if (memcmp(digest, sha256, sizeof digest) != 0) {
+        result = EOTA_UPDATE_HASH_MISMATCH;
+        goto abort;
+    }
+    if (!flash_io_acquire(policy)) {
+        result = EOTA_UPDATE_RESOURCE_FAILURE;
+        goto abort;
+    }
+    const esp_err_t finish = esp_ota_end(handle);
+    ota_started = false;
+    if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    if (finish != ESP_OK) {
+        return finish == ESP_ERR_OTA_VALIDATE_FAILED ? EOTA_UPDATE_SIGNATURE_INVALID :
+               EOTA_UPDATE_DOWNLOAD_FAILED;
+    }
+    if (eota_http_deadline_remaining_us(deadline) <= 0) return EOTA_UPDATE_DOWNLOAD_FAILED;
+    result = verify_image_size(policy, target, image_size_bytes, deadline);
+    if (result != EOTA_UPDATE_OK) return result;
+    *prepared = (eota_prepared_t){.slots = *slots, .image_size_bytes = image_size_bytes};
+    memcpy(prepared->sha256, sha256, sizeof prepared->sha256);
+    return EOTA_UPDATE_OK;
+abort:
+    if (ota_started) (void)esp_ota_abort(handle);
+    return result;
+}
+
+typedef struct {
+    esp_http_client_handle_t client;
+    esp_transport_handle_t transport;
+} eota_http_input_t;
+
+static void close_http_input(eota_http_input_t *input)
+{
+    if (input->client != NULL) (void)esp_http_client_cleanup(input->client);
+    input->client = NULL;
+    if (input->transport != NULL) (void)esp_transport_destroy(input->transport);
+    input->transport = NULL;
+}
+
+static int read_http_input(void *context, uint8_t *buffer, size_t capacity)
+{
+    eota_http_input_t *input = context;
+    const int count = esp_http_client_read(input->client, (char *)buffer, (int)capacity);
+    return count == -ESP_ERR_HTTP_EAGAIN ? EOTA_STREAM_READ_TIMEOUT : count;
+}
+
+static bool finish_http_input(void *context)
+{
+    eota_http_input_t *input = context;
+    if (!esp_http_client_is_complete_data_received(input->client)) return false;
+    /* Return TLS memory before partition hashing and SDK signature checks. */
+    close_http_input(input);
+    return true;
+}
+
+typedef struct {
+    const eota_stream_t *stream;
+    const eota_policy_t *policy;
+    eota_http_deadline_t *deadline;
+} eota_stream_input_t;
+
+static int read_stream_input(void *context, uint8_t *buffer, size_t capacity)
+{
+    eota_stream_input_t *input = context;
+    const int64_t left_us = eota_http_deadline_remaining_us(input->deadline);
+    /* Whole milliseconds keep a callback wait inside the actual session
+     * budget. A sub-millisecond remainder cannot authorize another wait. */
+    if (left_us < 1000) return -1;
+    const uint32_t remaining_ms = (uint32_t)(left_us / 1000);
+    const uint32_t timeout_ms = remaining_ms < input->policy->read_timeout_ms ?
+                               remaining_ms : input->policy->read_timeout_ms;
+    const int64_t started_us = esp_timer_get_time();
+    const int count = input->stream->read(input->stream->context, buffer, capacity, timeout_ms);
+    const int64_t finished_us = esp_timer_get_time();
+    const int64_t elapsed_us = finished_us - started_us;
+    if (finished_us < started_us || elapsed_us > (int64_t)timeout_ms * 1000 ||
+        eota_http_deadline_remaining_us(input->deadline) <= 0 ||
+        (count != EOTA_STREAM_READ_TIMEOUT && elapsed_us >= (int64_t)timeout_ms * 1000) ||
+        (count > 0 && (size_t)count > capacity)) return -1;
+    if (count > 0 && !eota_http_deadline_progress(input->deadline)) return -1;
+    return count;
+}
+
+static bool finish_stream_input(void *context)
+{
+    uint8_t trailing;
+    int count;
+    do {
+        count = read_stream_input(context, &trailing, 1);
+    } while (count == EOTA_STREAM_READ_TIMEOUT);
+    return count == 0;
+}
+#endif
+
 eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *image,
                            eota_progress_t progress, void *context, eota_prepared_t *prepared)
 {
@@ -526,152 +734,74 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     eota_result_t result = inspect_slots(policy, image->image_size_bytes, &slots, NULL, &target);
     if (eota_http_deadline_remaining_us(&deadline) <= 0) return EOTA_UPDATE_DOWNLOAD_FAILED;
     if (result != EOTA_UPDATE_OK) return result;
-    esp_ota_handle_t handle = 0;
-    bool ota_started = false;
-    esp_transport_handle_t transport = NULL;
-    esp_http_client_handle_t client = NULL;
+    eota_http_input_t source = {0};
     result = EOTA_UPDATE_RESOURCE_FAILURE;
-    transport = eota_http_transport_create(&deadline, policy->connect_timeout_ms,
-                                             policy->trusted_time);
-    if (transport == NULL) goto abort;
+    source.transport = eota_http_transport_create(&deadline, policy->connect_timeout_ms,
+                                                   policy->trusted_time);
+    if (source.transport == NULL) goto cleanup;
     const esp_http_client_config_t http = {
         .url = image->image_url,
-        .transport = transport,
+        .transport = source.transport,
         .disable_auto_redirect = true,
         .timeout_ms = (int)policy->read_timeout_ms,
         .buffer_size = 1024,
     };
-    client = esp_http_client_init(&http);
-    if (client == NULL) goto abort;
+    source.client = esp_http_client_init(&http);
+    if (source.client == NULL) goto cleanup;
     result = EOTA_UPDATE_DOWNLOAD_FAILED;
     if (eota_http_deadline_remaining_us(&deadline) <= 0 ||
-        esp_http_client_open(client, 0) != ESP_OK ||
-        eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
+        esp_http_client_open(source.client, 0) != ESP_OK ||
+        eota_http_deadline_remaining_us(&deadline) <= 0) goto cleanup;
     int64_t content_length;
     do {
-        if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
-        content_length = esp_http_client_fetch_headers(client);
-        if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
+        if (eota_http_deadline_remaining_us(&deadline) <= 0) goto cleanup;
+        content_length = esp_http_client_fetch_headers(source.client);
+        if (eota_http_deadline_remaining_us(&deadline) <= 0) goto cleanup;
     } while (content_length == -ESP_ERR_HTTP_EAGAIN);
     if (content_length != image->image_size_bytes ||
-        esp_http_client_get_status_code(client) != 200 ||
-        esp_http_client_is_chunked_response(client) ||
-        esp_http_client_get_content_length(client) != image->image_size_bytes) goto abort;
-    uint8_t buffer[EOTA_READ_BYTES];
-    uint8_t prefix[EOTA_PREFIX_BYTES];
-    uint8_t write_buffer[1024];
-    size_t write_used = 0;
-    uint32_t received = 0;
-    while (received < image->image_size_bytes) {
-        if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
-        const uint32_t left = image->image_size_bytes - received;
-        size_t wanted = left < sizeof buffer ? left : sizeof buffer;
-        if (received < sizeof prefix && wanted > sizeof prefix - received) {
-            wanted = sizeof prefix - received;
-        } else if (received >= sizeof prefix && wanted > sizeof write_buffer - write_used) {
-            wanted = sizeof write_buffer - write_used;
-        }
-        const int count = esp_http_client_read(client, (char *)buffer, (int)wanted);
-        if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
-        if (count == -ESP_ERR_HTTP_EAGAIN) continue;
-        if (count <= 0 || (size_t)count > wanted) goto abort;
-        if (received < sizeof prefix) {
-            memcpy(prefix + received, buffer, (size_t)count);
-        } else {
-            memcpy(write_buffer + write_used, buffer, (size_t)count);
-            write_used += (size_t)count;
-            if (write_used == sizeof write_buffer) {
-                if (!flash_io_acquire(policy)) {
-                    result = EOTA_UPDATE_RESOURCE_FAILURE;
-                    goto abort;
-                }
-                const esp_err_t write = esp_ota_write(handle, write_buffer, write_used);
-                if (!flash_io_release(policy)) {
-                    result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
-                    goto abort;
-                }
-                if (write != ESP_OK) goto abort;
-                if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
-                write_used = 0;
-            }
-        }
-        received += (uint32_t)count;
-        if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
-        if (received == sizeof prefix) {
-            if (!matches_image_target(policy, prefix)) {
-                result = EOTA_UPDATE_WRONG_TARGET;
-                goto abort;
-            }
-            /* The image length was already checked against the exact slot and
-             * HTTP body. Let IDF erase one affected sector at each sequential
-             * write instead of erasing the whole image in this call; Base can
-             * then arbitrate each Flash I/O turn with FRP scratch. */
-            if (!flash_io_acquire(policy)) {
-                result = EOTA_UPDATE_RESOURCE_FAILURE;
-                goto abort;
-            }
-            const esp_err_t begin = esp_ota_begin(target, OTA_WITH_SEQUENTIAL_WRITES, &handle);
-            ota_started = begin == ESP_OK;
-            if (!flash_io_release(policy)) {
-                result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
-                goto abort;
-            }
-            if (begin != ESP_OK) goto abort;
-            if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
-            memcpy(write_buffer, prefix, sizeof prefix);
-            write_used = sizeof prefix;
-        }
-        if (progress != NULL) progress(received, image->image_size_bytes, context);
-    }
-    if (!esp_http_client_is_complete_data_received(client) ||
-        eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
-    (void)esp_http_client_cleanup(client);
-    client = NULL;
-    (void)esp_transport_destroy(transport);
-    transport = NULL;
-    if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
-    if (write_used > 0) {
-        if (!flash_io_acquire(policy)) {
-            result = EOTA_UPDATE_RESOURCE_FAILURE;
-            goto abort;
-        }
-        const esp_err_t write = esp_ota_write(handle, write_buffer, write_used);
-        if (!flash_io_release(policy)) {
-            result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
-            goto abort;
-        }
-        if (write != ESP_OK) goto abort;
-    }
-    if (eota_http_deadline_remaining_us(&deadline) <= 0) goto abort;
-    uint8_t digest[EOTA_SHA256_BYTES];
-    result = hash_partition(policy, target, image->image_size_bytes, digest, &deadline);
-    if (result != EOTA_UPDATE_OK) goto abort;
-    if (memcmp(digest, image->sha256, sizeof digest) != 0) {
-        result = EOTA_UPDATE_HASH_MISMATCH;
-        goto abort;
-    }
-    if (!flash_io_acquire(policy)) {
-        result = EOTA_UPDATE_RESOURCE_FAILURE;
-        goto abort;
-    }
-    const esp_err_t finish = esp_ota_end(handle);
-    ota_started = false;
-    if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
-    if (finish != ESP_OK) {
-        return finish == ESP_ERR_OTA_VALIDATE_FAILED ? EOTA_UPDATE_SIGNATURE_INVALID :
-               EOTA_UPDATE_DOWNLOAD_FAILED;
-    }
-    if (eota_http_deadline_remaining_us(&deadline) <= 0) return EOTA_UPDATE_DOWNLOAD_FAILED;
-    result = verify_image_size(policy, target, image->image_size_bytes, &deadline);
-    if (result != EOTA_UPDATE_OK) return result;
-    *prepared = (eota_prepared_t){.slots = slots, .image_size_bytes = image->image_size_bytes};
-    memcpy(prepared->sha256, image->sha256, sizeof prepared->sha256);
-    return EOTA_UPDATE_OK;
-abort:
-    if (ota_started) (void)esp_ota_abort(handle);
-    if (client != NULL) (void)esp_http_client_cleanup(client);
-    if (transport != NULL) (void)esp_transport_destroy(transport);
+        esp_http_client_get_status_code(source.client) != 200 ||
+        esp_http_client_is_chunked_response(source.client) ||
+        esp_http_client_get_content_length(source.client) != image->image_size_bytes) goto cleanup;
+    const eota_input_t input = {
+        .read = read_http_input, .finish = finish_http_input, .context = &source,
+    };
+    result = receive_image(policy, image->image_size_bytes, image->sha256, &deadline,
+                             &slots, target, &input, progress, context, prepared);
+cleanup:
+    close_http_input(&source);
     return result;
+#endif
+}
+
+eota_result_t eota_prepare_stream(const eota_policy_t *policy, const eota_stream_t *stream,
+                                  eota_progress_t progress, void *context,
+                                  eota_prepared_t *prepared)
+{
+    if (prepared != NULL) memset(prepared, 0, sizeof *prepared);
+#if !EOTA_SIGNED_ENABLED
+    (void)policy; (void)stream; (void)progress; (void)context; (void)prepared;
+    return EOTA_UPDATE_UNSUPPORTED;
+#else
+    if (!valid_policy(policy) || !policy->trusted_time || prepared == NULL) {
+        return EOTA_UPDATE_INVALID_REQUEST;
+    }
+    const eota_result_t request_result = eota_validate_stream_request(stream);
+    if (request_result != EOTA_UPDATE_OK) return request_result;
+    eota_http_deadline_t deadline = {0};
+    if (!eota_http_deadline_init(&deadline, policy->total_timeout_ms,
+                                 policy->idle_timeout_ms)) return EOTA_UPDATE_RESOURCE_FAILURE;
+    eota_slots_t slots;
+    const esp_partition_t *target = NULL;
+    const eota_result_t result = inspect_slots(policy, stream->image_size_bytes,
+                                                &slots, NULL, &target);
+    if (eota_http_deadline_remaining_us(&deadline) <= 0) return EOTA_UPDATE_DOWNLOAD_FAILED;
+    if (result != EOTA_UPDATE_OK) return result;
+    eota_stream_input_t source = {.stream = stream, .policy = policy, .deadline = &deadline};
+    const eota_input_t input = {
+        .read = read_stream_input, .finish = finish_stream_input, .context = &source,
+    };
+    return receive_image(policy, stream->image_size_bytes, stream->sha256, &deadline,
+                            &slots, target, &input, progress, context, prepared);
 #endif
 }
 

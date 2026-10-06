@@ -45,6 +45,7 @@ static bool select_then_fail_without_switch;
 static bool slow_drip_headers, slow_drip_body;
 static bool missing_image_partition;
 static bool target_image_valid, fail_erase, reverse_slots;
+static bool fail_begin, fail_write;
 static const esp_partition_t *last_erased;
 static esp_err_t image_verify_result;
 static uint32_t verified_image_size_bytes;
@@ -95,6 +96,7 @@ static void reset(void)
     missing_image_partition = false;
     target_image_valid = true;
     fail_erase = false;
+    fail_begin = fail_write = false;
     reverse_slots = false;
     last_erased = NULL;
     image_verify_result = ESP_OK;
@@ -288,6 +290,7 @@ esp_err_t esp_ota_begin(const esp_partition_t *partition, size_t size, esp_ota_h
     assert(partition == &new_slot && size == OTA_WITH_SEQUENTIAL_WRITES && staged_size == 0);
     ++begin_calls;
     advance_time(begin_advance_us);
+    if (fail_begin) return ESP_FAIL;
     *handle = 1;
     return ESP_OK;
 }
@@ -295,10 +298,11 @@ esp_err_t esp_ota_write(esp_ota_handle_t handle, const void *data, size_t size)
 {
     assert(!flash_gate_enabled || flash_gate_active);
     assert(handle == 1 && staged_size + size <= sizeof staged_bytes);
-    memcpy(staged_bytes + staged_size, data, size);
-    staged_size += size;
     ++write_calls;
     advance_time(write_advance_us);
+    if (fail_write) return ESP_FAIL;
+    memcpy(staged_bytes + staged_size, data, size);
+    staged_size += size;
     return ESP_OK;
 }
 esp_err_t esp_ota_end(esp_ota_handle_t handle)
@@ -687,6 +691,208 @@ static void test_retire_inactive(void)
                   sizeof reverse_source_sha256) == 0);
 }
 
+typedef struct {
+    size_t offset;
+    size_t available;
+    size_t chunk;
+    bool disconnected;
+    bool trailing_byte;
+    bool oversized_count;
+    bool wait_before_body;
+    bool wait_after_prefix;
+    bool wait_at_eof;
+    int retry_reads;
+    int calls;
+    int eof_calls;
+    int64_t read_elapsed_us;
+    uint32_t shortest_timeout_ms;
+} stream_fixture_t;
+
+static int read_firmware_stream(void *context, uint8_t *buffer, size_t capacity,
+                                 uint32_t timeout_ms)
+{
+    stream_fixture_t *source = context;
+    assert(buffer != NULL && capacity > 0 && capacity <= 64);
+    assert(timeout_ms > 0 && timeout_ms <= policy.read_timeout_ms);
+    assert(!flash_gate_active);
+    ++source->calls;
+    if (timeout_ms < source->shortest_timeout_ms) source->shortest_timeout_ms = timeout_ms;
+    if (source->retry_reads > 0) {
+        --source->retry_reads;
+        advance_time((int64_t)timeout_ms * 1000);
+        return EOTA_STREAM_READ_TIMEOUT;
+    }
+    if (source->wait_before_body ||
+        (source->wait_after_prefix && source->offset >= PREFIX_BYTES) ||
+        (source->wait_at_eof && source->offset == source->available)) {
+        advance_time((int64_t)timeout_ms * 1000);
+        return EOTA_STREAM_READ_TIMEOUT;
+    }
+    advance_time(source->read_elapsed_us);
+    if (source->oversized_count) return (int)capacity + 1;
+    if (source->offset == source->available) {
+        ++source->eof_calls;
+        if (source->disconnected) return -1;
+        if (source->trailing_byte) { *buffer = 0xaa; return 1; }
+        return 0;
+    }
+    size_t count = capacity < source->chunk ? capacity : source->chunk;
+    if (count > source->available - source->offset) count = source->available - source->offset;
+    memcpy(buffer, image_bytes + source->offset, count);
+    source->offset += count;
+    return (int)count;
+}
+
+static eota_stream_t make_firmware_stream(stream_fixture_t *source)
+{
+    *source = (stream_fixture_t){
+        .available = IMAGE_BYTES, .chunk = 16, .shortest_timeout_ms = UINT32_MAX,
+    };
+    eota_image_t image = {0};
+    digest(&image);
+    eota_stream_t stream = {
+        .read = read_firmware_stream, .context = source, .image_size_bytes = IMAGE_BYTES,
+    };
+    memcpy(stream.sha256, image.sha256, sizeof stream.sha256);
+    return stream;
+}
+
+static void assert_failed_stream(const eota_stream_t *stream, eota_result_t expected)
+{
+    eota_prepared_t prepared;
+    memset(&prepared, 0xa5, sizeof prepared);
+    assert(eota_prepare_stream(&policy, stream, progress, NULL, &prepared) == expected);
+    assert_cleared_prepared(&prepared);
+    assert(boot == &old_slot && select_calls == 0);
+    assert(init_calls == 0 && transport_create_calls == 0 && cleanup_calls == 0);
+    assert(!flash_gate_active);
+}
+
+static void test_firmware_stream(void)
+{
+    stream_fixture_t source;
+    eota_prepared_t prepared;
+    reset();
+    eota_stream_t stream = make_firmware_stream(&source);
+    assert(eota_validate_stream_request(&stream) == EOTA_UPDATE_OK);
+    assert(eota_prepare_stream(&policy, &stream, progress, NULL, &prepared) == EOTA_UPDATE_OK);
+    assert(prepared.image_size_bytes == IMAGE_BYTES && source.eof_calls == 1 &&
+           staged_size == IMAGE_BYTES && memcmp(staged_bytes, image_bytes, IMAGE_BYTES) == 0 &&
+           init_calls == 0 && transport_create_calls == 0 && begin_calls == 1 &&
+           end_calls == 1 && abort_calls == 0 && select_calls == 0 && boot == &old_slot);
+    assert(eota_select(&policy, &prepared) == EOTA_UPDATE_OK && boot == &new_slot);
+
+    /* Reject all malformed requests before invoking the input or Flash. */
+    reset(); stream = make_firmware_stream(&source);
+    assert(eota_validate_stream_request(NULL) == EOTA_UPDATE_INVALID_REQUEST);
+    assert_failed_stream(NULL, EOTA_UPDATE_INVALID_REQUEST);
+    stream.read = NULL;
+    assert(eota_validate_stream_request(&stream) == EOTA_UPDATE_INVALID_REQUEST);
+    assert_failed_stream(&stream, EOTA_UPDATE_INVALID_REQUEST);
+    stream.read = read_firmware_stream;
+    stream.image_size_bytes = PREFIX_BYTES - 1;
+    assert_failed_stream(&stream, EOTA_UPDATE_INVALID_REQUEST);
+    stream.image_size_bytes = new_slot.size + 1;
+    assert_failed_stream(&stream, EOTA_UPDATE_TOO_LARGE);
+    assert(source.calls == 0 && begin_calls == 0);
+    stream.image_size_bytes = IMAGE_BYTES;
+    policy.trusted_time = false;
+    assert_failed_stream(&stream, EOTA_UPDATE_INVALID_REQUEST);
+    policy.trusted_time = true;
+
+    /* Explicit short EOF and disconnects at each receive phase must abort
+     * only the active SDK handle, without selecting incomplete bytes. */
+    const size_t cuts[] = {0, PREFIX_BYTES - 1, PREFIX_BYTES + 16, IMAGE_BYTES - 1};
+    for (size_t i = 0; i < sizeof cuts / sizeof cuts[0]; ++i) {
+        for (int disconnected = 0; disconnected < 2; ++disconnected) {
+            reset(); stream = make_firmware_stream(&source);
+            source.available = cuts[i];
+            source.disconnected = disconnected != 0;
+            assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+            assert(begin_calls == (cuts[i] >= PREFIX_BYTES ? 1 : 0));
+            assert(abort_calls == begin_calls && end_calls == 0);
+        }
+    }
+    reset(); stream = make_firmware_stream(&source); source.trailing_byte = true;
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(source.offset == IMAGE_BYTES && abort_calls == 1 && end_calls == 0);
+    reset(); stream = make_firmware_stream(&source); source.oversized_count = true;
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(begin_calls == 0);
+    reset(); stream = make_firmware_stream(&source); source.disconnected = true;
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(source.offset == IMAGE_BYTES && abort_calls == 1 && end_calls == 0);
+
+    reset(); stream = make_firmware_stream(&source); stream.sha256[0] ^= 1;
+    assert_failed_stream(&stream, EOTA_UPDATE_HASH_MISMATCH);
+    assert(abort_calls == 1 && end_calls == 0);
+    reset(); image_bytes[0] = 0; stream = make_firmware_stream(&source);
+    assert_failed_stream(&stream, EOTA_UPDATE_WRONG_TARGET);
+    assert(source.offset == PREFIX_BYTES && begin_calls == 0);
+    reset(); stream = make_firmware_stream(&source); bad_chip = true;
+    assert_failed_stream(&stream, EOTA_UPDATE_WRONG_TARGET);
+    assert(begin_calls == 0);
+    reset(); stream = make_firmware_stream(&source); end_result = ESP_ERR_OTA_VALIDATE_FAILED;
+    assert_failed_stream(&stream, EOTA_UPDATE_SIGNATURE_INVALID);
+    assert(end_calls == 1 && abort_calls == 0);
+    reset(); stream = make_firmware_stream(&source); verified_image_size_bytes = IMAGE_BYTES + 16;
+    assert_failed_stream(&stream, EOTA_UPDATE_INVALID_REQUEST);
+    assert(end_calls == 1 && abort_calls == 0);
+
+    /* Timeout retries do not count as progress; missing first bytes, missing
+     * body continuation and missing final framing each expire the same idle
+     * budget. A real progress stream can never extend its total deadline. */
+    reset(); stream = make_firmware_stream(&source); source.retry_reads = 2;
+    assert(eota_prepare_stream(&policy, &stream, progress, NULL, &prepared) == EOTA_UPDATE_OK);
+    assert(now_us == INT64_C(2000000) && abort_calls == 0);
+    for (int phase = 0; phase < 3; ++phase) {
+        reset(); stream = make_firmware_stream(&source);
+        source.wait_before_body = phase == 0;
+        source.wait_after_prefix = phase == 1;
+        source.wait_at_eof = phase == 2;
+        assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+        assert(now_us == INT64_C(30000000) && end_calls == 0);
+        assert(abort_calls == (phase > 0 ? 1 : 0));
+    }
+    reset(); stream = make_firmware_stream(&source);
+    source.chunk = 1; source.read_elapsed_us = 900000;
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(now_us == INT64_C(300600000) && source.shortest_timeout_ms == 300 &&
+           source.offset < IMAGE_BYTES && abort_calls == 1);
+    reset(); stream = make_firmware_stream(&source); source.read_elapsed_us = 999999;
+    assert(eota_prepare_stream(&policy, &stream, progress, NULL, &prepared) == EOTA_UPDATE_OK);
+    reset(); stream = make_firmware_stream(&source); source.read_elapsed_us = 1000000;
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(source.calls == 1 && begin_calls == 0);
+    reset(); stream = make_firmware_stream(&source); source.read_elapsed_us = 30000000;
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(source.calls == 1 && begin_calls == 0 && now_us == INT64_C(30000000));
+
+    /* The same short claim protects every Flash call, but never read/progress;
+     * acquisition/release failures retain no usable prepared result. */
+    reset(); stream = make_firmware_stream(&source); use_flash_gate();
+    assert(eota_prepare_stream(&policy, &stream, progress, NULL, &prepared) == EOTA_UPDATE_OK);
+    assert(flash_gate_acquires == flash_gate_releases && !flash_gate_active);
+    reset(); stream = make_firmware_stream(&source); use_flash_gate(); flash_gate_deny_at = 2;
+    assert_failed_stream(&stream, EOTA_UPDATE_RESOURCE_FAILURE);
+    assert(begin_calls == 0 && abort_calls == 0);
+    reset(); stream = make_firmware_stream(&source); use_flash_gate(); flash_gate_fail_release_at = 2;
+    assert_failed_stream(&stream, EOTA_UPDATE_BOOT_STATE_UNKNOWN);
+    assert(begin_calls == 1 && abort_calls == 1);
+    reset(); stream = make_firmware_stream(&source); fail_begin = true;
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(begin_calls == 1 && abort_calls == 0);
+    reset(); stream = make_firmware_stream(&source); fail_write = true;
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(write_calls == 1 && abort_calls == 1);
+    reset(); stream = make_firmware_stream(&source); fail_read = true;
+    assert_failed_stream(&stream, EOTA_UPDATE_RESOURCE_FAILURE);
+    assert(partition_reads == 1 && abort_calls == 1);
+    reset(); stream = make_firmware_stream(&source); write_advance_us = INT64_C(30000000);
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(write_calls == 1 && abort_calls == 1);
+}
+
 int main(void)
 {
     eota_image_t request = {.image_url = "https://example.test/esp-base.bin", .image_size_bytes = IMAGE_BYTES};
@@ -952,5 +1158,6 @@ int main(void)
     assert(!fake_transport.alive && transport_create_calls == transport_destroy_calls);
 
     test_flash_gate();
+    test_firmware_stream();
     puts("  ota_update passed (EAGAIN return, prefix, hash, signature, selector recovery, Flash gate; fake SDK)");
 }

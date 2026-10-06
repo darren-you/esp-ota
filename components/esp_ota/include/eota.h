@@ -2,6 +2,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -59,6 +60,20 @@ typedef struct {
     uint32_t image_size_bytes;
 } eota_image_t;
 
+/* read returns 1..capacity bytes, zero only for an explicit end of input,
+ * EOTA_STREAM_READ_TIMEOUT for a retryable wait, and any other negative value
+ * for a broken input. Each call must return within timeout_ms; the library
+ * checks elapsed time but cannot interrupt a blocked callback. The caller owns
+ * authentication, connection establishment, framing and closing the stream.
+ * EOF must reflect actual framing/FIN, never only image_size_bytes. */
+#define EOTA_STREAM_READ_TIMEOUT (-2)
+typedef struct {
+    int (*read)(void *context, uint8_t *buffer, size_t capacity, uint32_t timeout_ms);
+    void *context;
+    uint8_t sha256[EOTA_SHA256_BYTES];
+    uint32_t image_size_bytes;
+} eota_stream_t;
+
 typedef struct {
     uint8_t running_subtype;
     uint8_t boot_subtype;
@@ -112,6 +127,8 @@ eota_result_t eota_preflight(const eota_policy_t *policy, uint32_t image_size_by
  * Call this before retiring an old inactive image; preflight and prepare still
  * perform their own live checks. */
 eota_result_t eota_validate_image_request(const eota_image_t *image);
+/* Static callback and minimum signed-image-size check, before any slot write. */
+eota_result_t eota_validate_stream_request(const eota_stream_t *stream);
 /* Destructively retire the inactive app after the caller has durably recorded
  * the authorized operation and serialized all app/otadata writers. The exact
  * signed running image must match expected_running_sha256, be selected and
@@ -135,6 +152,19 @@ eota_result_t eota_retire_inactive(const eota_policy_t *policy,
  * callback must neither block nor call eota_* recursively. */
 eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *image,
                            eota_progress_t progress, void *context, eota_prepared_t *prepared);
+/* Receives the same complete signed image from a caller-owned bounded stream.
+ * Uses the HTTPS preparation's target/digest/signature/Flash/A-B mechanism,
+ * without creating a connection or selecting a boot slot. Requests at most
+ * 64 bytes per read and retains at most a 1024-byte sequential-write buffer
+ * plus the fixed image prefix. After image_size_bytes, one additional byte is
+ * requested and explicit EOF is required; trailing bytes and missing EOF fail.
+ * Total/idle deadlines start before slot preflight. Each read receives the
+ * shorter policy read_timeout_ms or remaining session budget. Late bytes may
+ * not refresh idle time. The caller enforces connect_timeout_ms when opening
+ * its transport and keeps the stream/context alive until this call returns. */
+eota_result_t eota_prepare_stream(const eota_policy_t *policy, const eota_stream_t *stream,
+                                  eota_progress_t progress, void *context,
+                                  eota_prepared_t *prepared);
 /* Rechecks slots, full signed image digest, the current trusted project's
  * image header and SDK signature verification,
  * then selects the target boot slot. On selection failure it restores the
