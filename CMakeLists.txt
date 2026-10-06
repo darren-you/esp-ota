@@ -9,7 +9,7 @@ if(BUILD_TESTING)
         add_executable(${target} components/esp_ota/src/update.c
             components/esp_ota/src/http_deadline.c tests/update_test.c)
         target_include_directories(${target} PRIVATE components/esp_ota/include
-            components/esp_ota/src tests/fakes/ota_update tests/fakes)
+            components/esp_ota/src tests/fakes/ota-update tests/fakes)
         target_compile_definitions(${target} PRIVATE _GNU_SOURCE
             CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=1 EOTA_TEST_CHIP_ID=${chip_id})
         target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -UNDEBUG)
@@ -23,7 +23,7 @@ if(BUILD_TESTING)
         tests/http_deadline_test.c)
     target_include_directories(eota_http_deadline_test PRIVATE components/esp_ota/include
         components/esp_ota/src
-        tests/fakes/ota_update tests/fakes)
+        tests/fakes/ota-update tests/fakes)
     target_compile_options(eota_http_deadline_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
     add_test(NAME http_deadline COMMAND eota_http_deadline_test)
 
@@ -37,7 +37,7 @@ if(BUILD_TESTING)
         components/esp_ota/src/http_deadline.c
         tests/http_transport_test.c)
     target_include_directories(eota_http_transport_test PRIVATE
-        components/esp_ota/include components/esp_ota/src tests/fakes/transport tests/fakes/ota_update tests/fakes)
+        components/esp_ota/include components/esp_ota/src tests/fakes/transport tests/fakes/ota-update tests/fakes)
     target_compile_options(eota_http_transport_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
     target_link_libraries(eota_http_transport_test PRIVATE Threads::Threads)
     add_test(NAME http_transport COMMAND eota_http_transport_test)
@@ -49,7 +49,7 @@ if(BUILD_TESTING)
             components/esp_ota/src/http_deadline.c tests/http_transport_test.c)
         target_include_directories(eota_http_no_${guard}_test PRIVATE
             components/esp_ota/include components/esp_ota/src
-            tests/fakes/transport tests/fakes/ota_update tests/fakes)
+            tests/fakes/transport tests/fakes/ota-update tests/fakes)
         target_compile_definitions(eota_http_no_${guard}_test PRIVATE
             EOTA_TEST_NO_${guard_macro}=1)
         target_compile_options(eota_http_no_${guard}_test PRIVATE

@@ -37,7 +37,7 @@ target_include_directories(eota_real_https_client PRIVATE
     ${CMAKE_SOURCE_DIR}/components/esp_ota/include
     ${CMAKE_SOURCE_DIR}/components/esp_ota/src
     ${CMAKE_SOURCE_DIR}/tests/fakes/transport
-    ${CMAKE_SOURCE_DIR}/tests/fakes/ota_update
+    ${CMAKE_SOURCE_DIR}/tests/fakes/ota-update
     ${CMAKE_SOURCE_DIR}/tests/fakes)
 target_compile_options(eota_real_https_client PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(eota_real_https_client PRIVATE mbedtls mbedx509
