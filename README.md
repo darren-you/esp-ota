@@ -10,7 +10,8 @@ flowchart LR
     api --> request["validate_image_request：HTTPS URL 与镜像最小长度"]
     api --> preflight["preflight：运行槽、目标槽与产品约束"]
     api --> identity["verified image：验签与完整镜像摘要"]
-    api --> prepare["prepare：HTTPS、镜像头、写槽、整镜像摘要与签名"]
+    api --> prepare["prepare / prepare_stream：HTTPS或有界输入、镜像头、顺序写槽与完整核验"]
+    caller_stream["调用方已认证FRP入站流：精确长度、背压与结束帧"] --> prepare
     api --> select["select：重新读回摘要、产品目标、签名和 boot selector"]
     api --> confirm["inspect / confirm / reject：pending 槽确认或回滚"]
     prepare --> transport["http_transport：异步 DNS、非阻塞 TCP / TLS、请求与响应"]
@@ -28,17 +29,19 @@ flowchart LR
     sample --> api
 ```
 
-准备阶段用 IDF 写 inactive 应用槽并验证完整 signed bin，**不切启动槽**；`esp_ota_begin` 可能清除该槽原有的 otadata 记录。与 Container 联合升级时，调用方先持久登记并读回 OTA 收据，再用 `eota_retire_inactive` 在写新固件前精确退役旧备用镜像，经签名/otadata 读回证明后才退役旧 Container 绑定；中途断电由调用方按原收据重入对账。应用可在两阶段之间持久提交与业务包的绑定；`eota_select` 再核对实际槽、摘要、当前可信产品约束与 IDF 签名，并显式切槽。切槽失败时库恢复旧运行槽的 VALID 状态并清除未启动候选的 NEW 状态，读回不确定则明确报错。库不创建 worker、不写业务 NVS、不管理 Wasm 包，也不替应用决定何时确认新固件。具体调用合同见 [API 说明](docs/design/api-contract.md)。
+准备阶段用 IDF 写 inactive 应用槽并验证完整 signed bin，**不切启动槽**；`esp_ota_begin` 可能清除该槽原有的 otadata 记录。调用方先持久登记并读回 OTA 收据，在需要精确退役旧备用镜像时调用 `eota_retire_inactive`；中途断电按原收据和真实槽状态重入对账。`eota_select` 再核对实际槽、摘要、当前可信产品约束与 IDF 签名，并显式切槽。切槽失败时库恢复旧运行槽的 VALID 状态并清除未启动候选的 NEW 状态，读回不确定则明确报错。库不创建 worker、不写业务 NVS，应用负责升级授权、唯一 operation 与新固件本地确认。具体调用合同见 [API 说明](docs/design/api-contract.md)。
 
-`eota_prepare` 在已经核对 HTTP 正文长度、槽容量与镜像目标后，使用 IDF 的连续写入模式，使擦除随顺序写入逐扇区发生；完整 signed bin 长度、摘要和 SDK 验签仍按请求的精确值核对。调用方可在可信 policy 中绑定成对的 Flash I/O `acquire`／`release`：旧槽退役、`esp_ota_begin`、每次 `esp_ota_write`、`esp_ota_end`、切槽及失败恢复中的 app/otadata 写调用均单独仲裁；显式分区读取按最多 1024 字节一次获取，槽状态观察在本次查询期间获取，SDK 整镜像验签在一次调用期间持有仲裁。HTTPS 等待、摘要计算和进度回调期间不持有短 claim。库只执行调用方提供的门，不自行取得产品收据或 FRP scratch lease；整镜像验签及回退资格检查的占用时长和实体 Flash 时延仍须在 Base 组合负载下核对。
+`eota_prepare` 与 `eota_prepare_stream` 在已经核对来源精确长度、槽容量与镜像目标后，使用 IDF 的连续写入模式，使擦除随顺序写入逐扇区发生；完整 signed bin 长度、摘要和 SDK 验签仍按请求的精确值核对。调用方可在可信 policy 中绑定成对的 Flash I/O `acquire`／`release`：旧槽退役、`esp_ota_begin`、每次 `esp_ota_write`、`esp_ota_end`、切槽及失败恢复中的 app/otadata 写调用均单独仲裁；显式分区读取按最多 1024 字节一次获取，槽状态观察在本次查询期间获取，SDK 整镜像验签在一次调用期间持有仲裁。HTTPS／入站流等待、摘要计算和进度回调期间不持有短 claim。库只执行调用方提供的门，不自行取得产品收据或 FRP scratch lease；整镜像验签及回退资格检查的占用时长和实体 Flash 时延仍须在 Base 组合负载下核对。
 
 旧备用镜像首次擦除前，调用方还须用 `eota_validate_image_request` 静态检查新请求的 HTTPS URL 和最小镜像头长度。`eota_prepare` 复用这一检查；槽预检仍单独核对可信 policy、实际状态和分区容量。
+
+`eota_prepare_stream` 从调用方拥有的 `eota_stream_t.read` 接收完整签名固件，固定单次最多 64 B、顺序写缓冲 1024 B 和镜像头缓冲；不申请整镜像 RAM 或第三 Flash 副本。精确长度之后要求来源明确返回 framing／FIN 的 EOF；截断、额外字节、断流、错摘要、错签名及逾期都清空准备结果且不切槽。每次读取传入至多 policy 的单次预算，重试不刷新无进展期限，迟到数据拒绝；5 秒隧道建立由调用方负责，1 秒读取、30 秒无进展和 300 秒会话总期限由实际 policy 装配。输入流、认证、HTTP framing、连接关闭和流预算仍由消费者管理；库不能抢占阻塞 callback。实现和本轮软件证据见[入站流检查点](docs/operations/inbound_stream_checkpoint.md)。
 
 公开 `include/eota_http_transport.h` 现在允许其他 HTTPS 消费者复用既有期限与 DNS／TCP／TLS 机制，调用方保有期限对象并按 HTTP cleanup、transport destroy、owner release 顺序回收；固件与产品包策略仍分别由原调用方负责。接口与验证边界见[API 说明](docs/design/api-contract.md#共享-https-传输机制)及[共享期限检查点](docs/operations/shared-http-deadline-checkpoint.md)。
 
 ## 独立构建
 
-本仓不需要相邻 Base、FRP、MQTT、Container 或私有 Tool 才能运行 host 回归：
+本仓不需要相邻业务仓或私有 Tool 才能运行 host 回归：
 
 ```bash
 cmake -S . -B build -DBUILD_TESTING=ON
@@ -64,7 +67,7 @@ idf.py -C examples/c3 build
 idf.py -C examples/esp32 -B build-esp32 build
 ```
 
-[共用样例源码](examples/common/README.md)分别装配到 [独立 C3 样例](examples/c3/README.md)与 [独立 ESP32 样例](examples/esp32/README.md)。C3 保持已核对的 4 MiB 双应用槽事实；ESP32 默认只读编译，不假定第二台设备的分区。两者默认都不写 Flash 或 otadata；受控测试需要各板仓外输入、受控签名构建、已授权设备和恢复基线。编译、host 假件和临时测试键都不授权刷板、改分区、eFuse 或生产密钥操作。新 Container 布局须另行验证后由调用方更新可信约束。
+[共用样例源码](examples/common/README.md)分别装配到 [独立 C3 样例](examples/c3/README.md)与 [独立 ESP32 样例](examples/esp32/README.md)。C3 保持已核对的 4 MiB 双应用槽事实；ESP32 默认只读编译，不假定第二台设备的分区。两者默认都不写 Flash 或 otadata；受控测试需要各板仓外输入、受控签名构建、已授权设备和恢复基线。编译、host 假件和临时测试键都不授权刷板、改分区、eFuse 或生产密钥操作。新分区布局须另行验证后由调用方更新可信约束。
 
 ## 当前验证边界
 
