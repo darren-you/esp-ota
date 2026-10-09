@@ -20,7 +20,7 @@ python3 ../../components/esp_ota/tools/check_sdk.py --path "$IDF_PATH"
 idf.py -C . -B build-esp32 build
 ```
 
-签名升级实验需先按[Base 原生业务与固件 OTA 计划](https://github.com/esp-space/esp-base/blob/master/docs/operations/ota-allocation-diagnostic-checkpoint.md)建立本板完整 Flash 恢复基线、当前分区/bootloader/运行槽和可回退签名镜像，取得精确设备授权。仓外 `lab_inputs.h` 除网络、时间、URL、完整 signed bin 长度及 SHA-256 外，必须填写从**本板**读回的 `EOTA_LAB_OTA_0_ADDRESS_BYTES`、`EOTA_LAB_OTA_1_ADDRESS_BYTES`、`EOTA_LAB_OTA_SIZE_BYTES`；格式见 [输入模板](lab_inputs_example.h)。仓外 sdkconfig defaults 必须启用 `CONFIG_PARTITION_TABLE_CUSTOM=y`，将 `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME` 指向经核对的**本板**分区 CSV，并配置该 SDK 对 ESP32 target 选择的 ECDSA v1 签名与受控密钥。两份输入都须使用仓外、构建目录外的绝对路径；不同板卡与候选使用隔离的 build/sdkconfig 输出。武装构建会拒绝通用分区选择或缺失的槽几何：
+签名升级实验需先按[Base 原生业务与固件 OTA 计划](https://github.com/darren-you/esp-base/blob/master/docs/operations/ota-allocation-diagnostic-checkpoint.md)建立本板完整 Flash 恢复基线、当前分区/bootloader/运行槽和可回退签名镜像，取得精确设备授权。仓外 `lab_inputs.h` 除网络、时间、URL、完整 signed bin 长度及 SHA-256 外，必须填写从**本板**读回的 `EOTA_LAB_OTA_0_ADDRESS_BYTES`、`EOTA_LAB_OTA_1_ADDRESS_BYTES`、`EOTA_LAB_OTA_SIZE_BYTES`；格式见 [输入模板](lab_inputs_example.h)。仓外 sdkconfig defaults 必须启用 `CONFIG_PARTITION_TABLE_CUSTOM=y`，将 `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME` 指向经核对的**本板**分区 CSV，并配置该 SDK 对 ESP32 target 选择的 ECDSA v1 签名与受控密钥。两份输入都须使用仓外、构建目录外的绝对路径；不同板卡与候选使用隔离的 build/sdkconfig 输出。武装构建会拒绝通用分区选择或缺失的槽几何：
 
 ```bash
 idf.py -C . -B build-esp32-signed \
