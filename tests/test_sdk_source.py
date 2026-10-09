@@ -85,7 +85,7 @@ class SDKObjectOwnershipTest(unittest.TestCase):
                  str(self.source), "module")
         module = parent / "module"
         self.assertTrue((module / ".git").is_file())
-        SDK.verify_complete_repository(module)
+        SDK.verify_complete_repository(module, source_root=parent)
 
     def test_rejects_ignored_dirty_recursive_submodule(self):
         sdk = self.root / "sdk"
@@ -135,6 +135,69 @@ class SDKObjectOwnershipTest(unittest.TestCase):
         with patch.dict(os.environ, {"GIT_OBJECT_DIRECTORY": str(self.source / ".git/objects")}):
             with self.assertRaisesRegex(ValueError, "alternate"):
                 SDK.verify_complete_repository(self.source)
+
+    def test_rejects_external_separate_git_directory_with_worktree_binding(self):
+        separate = self.root / "separate"
+        outside = self.root / "separate.git"
+        self.git(self.root, "clone", "-q", "--separate-git-dir=" + str(outside),
+                 str(self.source), str(separate))
+        self.git(separate, "config", "core.worktree", str(separate))
+        self.assertEqual(self.git(separate, "status", "--porcelain"), "")
+        self.git(separate, "fsck", "--connectivity-only", "--no-dangling")
+        with self.assertRaisesRegex(ValueError, "Git 元数据"):
+            SDK.verify_complete_repository(separate)
+
+    def test_rejects_git_environment_redirecting_metadata_and_worktree(self):
+        alias = self.root / "environment-redirect"
+        shutil.copytree(self.source, alias, ignore=shutil.ignore_patterns(".git"))
+        with patch.dict(os.environ, {"GIT_DIR": str(self.source / ".git"),
+                                    "GIT_WORK_TREE": str(alias)}):
+            with self.assertRaisesRegex(ValueError, "Git 环境"):
+                SDK.verify_complete_repository(alias)
+
+    def test_rejects_replace_ref_even_when_head_and_status_match(self):
+        original = self.git(self.source, "rev-parse", "HEAD")
+        filename = self.source / "source.c"
+        original_bytes = filename.read_bytes()
+        filename.write_text("int substituted_business;\n")
+        self.git(self.source, "add", filename.name)
+        self.git(self.source, "commit", "-qm", "different source fixture")
+        replacement = self.git(self.source, "rev-parse", "HEAD")
+        self.git(self.source, "replace", original, replacement)
+        self.git(self.source, "checkout", "-q", "--detach", original)
+        self.assertEqual(self.git(self.source, "rev-parse", "HEAD"), original)
+        self.assertEqual(self.git(self.source, "status", "--porcelain"), "")
+        self.assertEqual(filename.read_text(), "int substituted_business;\n")
+        # The verifier's ordinary Git reads ignore replacement refs even before rejection.
+        self.assertEqual(SDK.git(self.source, "show", "HEAD:" + filename.name).encode(),
+                         original_bytes.rstrip(b"\n"))
+        with self.assertRaisesRegex(ValueError, "replace"):
+            SDK.verify_complete_repository(self.source)
+
+    def test_rejects_grafts_even_when_fsck_passes(self):
+        head = self.git(self.source, "rev-parse", "HEAD")
+        (self.source / ".git/info/grafts").write_text(head + "\n")
+        self.git(self.source, "fsck", "--connectivity-only", "--no-dangling")
+        with self.assertRaisesRegex(ValueError, "grafts"):
+            SDK.verify_complete_repository(self.source)
+
+    def test_rejects_absorbed_metadata_outside_own_root_modules(self):
+        parent = self.root / "parent"
+        parent.mkdir()
+        self.git(parent, "init", "-q", "-b", "master")
+        self.git(parent, "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+                 str(self.source), "module")
+        module = parent / "module"
+        SDK.verify_complete_repository(module, source_root=parent)
+        directory = Path(self.git(module, "rev-parse", "--absolute-git-dir"))
+        outside = self.root / "outside-module.git"
+        directory.rename(outside)
+        (module / ".git").write_text("gitdir: " + str(outside) + "\n")
+        self.git(self.root, "config", "--file", str(outside / "config"),
+                 "core.worktree", str(module))
+        self.git(module, "fsck", "--connectivity-only", "--no-dangling")
+        with self.assertRaisesRegex(ValueError, "Git 元数据"):
+            SDK.verify_complete_repository(module, source_root=parent)
 
 
 if __name__ == "__main__":
