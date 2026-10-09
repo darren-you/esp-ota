@@ -3,6 +3,7 @@ import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -40,6 +41,22 @@ class SDKObjectOwnershipTest(unittest.TestCase):
         self.git(shared, "fsck", "--connectivity-only", "--no-dangling")
         with self.assertRaisesRegex(ValueError, "alternates"):
             SDK.verify_complete_repository(shared)
+
+    def test_rejects_symlinked_git_directory_even_when_fsck_passes(self):
+        alias = self.root / "symlinked-git-directory"
+        shutil.copytree(self.source, alias, ignore=shutil.ignore_patterns(".git"))
+        (alias / ".git").symlink_to(self.source / ".git", target_is_directory=True)
+        self.git(alias, "fsck", "--connectivity-only", "--no-dangling")
+        with self.assertRaisesRegex(ValueError, "Git 元数据"):
+            SDK.verify_complete_repository(alias)
+
+    def test_rejects_unbound_gitfile_even_when_fsck_passes(self):
+        alias = self.root / "unbound-gitfile"
+        shutil.copytree(self.source, alias, ignore=shutil.ignore_patterns(".git"))
+        (alias / ".git").write_text("gitdir: " + str(self.source / ".git") + "\n")
+        self.git(alias, "fsck", "--connectivity-only", "--no-dangling")
+        with self.assertRaisesRegex(ValueError, "Git 元数据"):
+            SDK.verify_complete_repository(alias)
 
     def test_rejects_linked_worktree_even_when_fsck_passes(self):
         linked = self.root / "linked"

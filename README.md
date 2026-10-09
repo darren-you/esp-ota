@@ -46,7 +46,7 @@ flowchart LR
 ```bash
 cmake -S . -B build -DBUILD_TESTING=ON
 cmake --build build
-ctest --test-dir build --output-on-failure
+(cd build && ctest --output-on-failure)
 ```
 
 有锁定 SDK 后，可另跑真实 mbedTLS HTTPS 回环：
@@ -54,7 +54,7 @@ ctest --test-dir build --output-on-failure
 ```bash
 cmake -S . -B build-real-https -DBUILD_TESTING=ON -DEOTA_REAL_HTTPS_TEST=ON
 cmake --build build-real-https
-ctest --test-dir build-real-https --output-on-failure
+(cd build-real-https && ctest --output-on-failure)
 ```
 
 此入口读取 `IDF_PATH`、核对 `sdk-lock.json`，并使用本机 Python 与 OpenSSL 生成临时测试 CA；不会连接外网或设备。
