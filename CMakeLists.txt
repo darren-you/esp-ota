@@ -5,6 +5,9 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 include(CTest)
 option(EOTA_REAL_HTTPS_TEST "Build the native SDK Mbed TLS HTTPS loopback test" OFF)
 if(BUILD_TESTING)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME sdk_source COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sdk_source.py")
     function(add_eota_update_test target test_name chip_id)
         add_executable(${target} components/esp_ota/src/update.c
             components/esp_ota/src/http_deadline.c tests/update_test.c)
