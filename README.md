@@ -37,7 +37,7 @@ flowchart LR
 
 `eota_prepare_stream` 从调用方拥有的 `eota_stream_t.read` 接收完整签名固件，固定单次最多 64 B、顺序写缓冲 1024 B 和镜像头缓冲；不申请整镜像 RAM 或第三 Flash 副本。精确长度之后要求来源明确返回 framing／FIN 的 EOF；截断、额外字节、断流、错摘要、错签名及逾期都清空准备结果且不切槽。每次读取传入至多 policy 的单次预算，重试不刷新无进展期限，迟到数据拒绝；5 秒隧道建立由调用方负责，1 秒读取、30 秒无进展和 300 秒会话总期限由实际 policy 装配。输入流、认证、HTTP framing、连接关闭和流预算仍由消费者管理；库不能抢占阻塞 callback。实现和本轮软件证据见[入站流检查点](docs/operations/inbound_stream_checkpoint.md)。
 
-公开 `include/eota_http_transport.h` 现在允许其他 HTTPS 消费者复用既有期限与 DNS／TCP／TLS 机制，调用方保有期限对象并按 HTTP cleanup、transport destroy、owner release 顺序回收；固件与产品包策略仍分别由原调用方负责。接口与验证边界见[API 说明](docs/design/api-contract.md#共享-https-传输机制)及[共享期限检查点](docs/operations/shared-http-deadline-checkpoint.md)。
+公开 `include/eota_http_transport.h` 现在允许其他 HTTPS 消费者复用既有期限与 DNS／TCP／TLS 机制，调用方保有期限对象并按 HTTP cleanup、transport destroy、owner release 顺序回收；授权、来源长度、Flash 与持久化策略仍由各 HTTPS 调用方负责。接口与验证边界见[API 说明](docs/design/api-contract.md#共享-https-传输机制)及[共享期限检查点](docs/operations/shared-http-deadline-checkpoint.md)。
 
 ## 独立构建
 
@@ -75,7 +75,7 @@ idf.py -C examples/esp32 -B build-esp32 build
 - C3 与 ESP32 的普通构建、`chip_id=0` 故障回归及仓外临时测试键签名构建均已在固定 SDK 下通过；C3 使用 RSA-3072，ESP32 使用 ECDSA v1。离线验签只证明生成的镜像与测试键相符，不含设备写入，也不证明当前 ESP32 旧 AT bootloader 能运行该镜像。两板完整 HTTPS、Flash、bootloader、回滚与恢复链路仍待分别实板验收。
 - 准备阶段从槽预检前记录单调时钟起点；异步 DNS、非阻塞 TCP、mBed TLS 握手、请求发送、响应头和响应体共用绝对总期限与无进展期限，TCP/TLS 建连另受连接期限约束。每次读写另以 SDK 的 `read_timeout_ms` 建立单次绝对截止，TLS 记录持续慢滴流或 TLS 1.3 连续会话票据不能反复重置该期限；`select` 只等待这些期限的最短剩余时间。到达旧无进展期限的迟到字节不能刷新期限。Flash 擦除、写入、读回、验签及清理调用返回后也检查同一下载期限，逾期不返回可切槽的准备结果。传输不创建到期定时器，调用栈退出后由传输所有者关闭 socket。设备侧 TLS 使用默认 CA bundle、强制证书验证及 URL 原主机名的 SNI/证书名校验。固定 SDK 的 `close`、密码学单步、HTTP 解析和 Flash 调用不能由本库抢占，30 秒无进展和 5 分钟总期限不构成 `eota_prepare` 的严格墙钟返回保证。真实 HTTPS host 回环与 C3 编译仍不能代替设备上的完整 HTTP/Flash/bootloader 证据；P5-04 与实板升级、回滚、Base 接入仍未验收。
 
-源码与测试从 Base 已提交源码迁入的来源和改造边界见[来源记录](docs/design/source-provenance.md)。工作区完整阶段与验收条件以[五仓主计划](https://github.com/darren-you/darren-space/blob/master/harness/docs/design/darren-space/global/esp-base-frp-mqtt-ota-container-development-plan.md)为准。
+源码与测试从 Base 已提交源码迁入的来源和改造边界见[来源记录](docs/design/source-provenance.md)。工作区完整阶段与验收条件以[Base 原生业务与固件 OTA 计划](https://github.com/esp-space/esp-base/blob/master/docs/operations/ota-allocation-diagnostic-checkpoint.md)为准。
 本轮编译与 host 测试的精确结果见[开发检查点](docs/operations/development-checkpoint.md)。
 共用样例显式使用 RAM Wi-Fi 存储；本轮武装离线构建与真实链接复核见[样例检查点](docs/operations/ram-wifi-sample-checkpoint.md)。
 

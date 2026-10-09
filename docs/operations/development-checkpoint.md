@@ -86,7 +86,7 @@ AppleClang ASan/UBSan 与固定 SDK mbedTLS 4.1 主机 CTest 5/5 通过。固定
 
 AppleClang ASan/UBSan host CTest 4/4 通过，假件覆盖完整 signed bin 末尾字节、坏镜像、Flash 失败、错误分区几何和失败输出清零。固定 SDK 普通 C3 样例构建通过，镜像 `0x28730` 字节；仓外临时 RSA-3072 测试键的签名 C3 样例构建通过，镜像 `0x31000` 字节，SHA-256 `8ae3a2828272853ac31eaf9f53bf0670e63fe11523e9615673ddd1f040d28167`，本机 `espsecure verify-signature --version 2 --keyfile` 验签通过。未刷设备、改分区或用生产凭据。
 
-本切片只给出**已验签镜像字节身份**。固定 bootloader 在下一次启动会把 `PENDING_VERIFY` 标成 `ABORTED`，而 `NEW` 是尚未经历启动/自检的候选；`esp_ota_get_boot_partition` 自身也不保证镜像有效。Base/Container 尚缺在同一串行所有权下对真实 otadata、boot selector、回退资格及业务包绑定的联合状态转换；当前 Base 也没有独立包分区。因此不能把镜像摘要直接作为 `econtainer_slot_firmware_set_t` 的已证实可启动集合，P6-10/P7-04 仍未验收。
+本切片只给出**已验签镜像字节身份**。固定 bootloader 在下一次启动会把 `PENDING_VERIFY` 标成 `ABORTED`，而 `NEW` 是尚未经历启动/自检的候选；`esp_ota_get_boot_partition` 自身也不保证镜像有效。镜像摘要与 SDK 验签只证明字节身份，不能代替运行槽状态、真实 otadata、boot selector、自检与回退资格的联合核对；该切片未取得真实设备启动与恢复资格。
 
 ## 选槽阶段重验当前产品目标（2026-09-24）
 
@@ -129,13 +129,13 @@ AppleClang ASan/UBSan host CTest 4/4 通过。锁定公开 ESP-IDF fork `855937c
 | C3 仓外临时 RSA-3072 测试键签名 | 1118208 (`0x111000`) | `e2472beac900288fa325056edec185e84e9e1c7a03d2186d159641ca92de6598` | `espsecure verify-signature --version 2 --keyfile` 通过；RSA、signed update、custom transport 已启用 |
 | ESP32 仓外临时 ECDSA P-256 测试键签名 | 1048564 (`0xffff4`) | `2ea7094b3b310f65ff89a56496fd06beaed81ce7a1fe46d88f9ce555b5e297d4` | `espsecure verify-signature --version 1 --keyfile` 通过；ECDSA v1、signed update、custom transport 已启用；ELF 包含 `eota_prepare`、`eota_select` |
 
-签名构建只使用仓外测试键、无效网络占位输入以及独立 build/sdkconfig。C3 使用已确认的现有 C3 样例分区；ESP32 的仓外 CSV 依据两份逐字节一致的 4 MiB Flash 只读备份：分区表位于 `0x8000`，`phy_init@0xf000/0x1000`、`otadata@0x10000/0x2000`、`nvs@0x12000/0xe000`、`at_customize` type `0x40`/subtype `0x00` `@0x20000/0xe0000`、`ota_0@0x100000/0x180000`、`ota_1@0x280000/0x180000`。固定 SDK 的官方分区解析器读回生成表与上述几何一致。该表只作为当前旧板的**离线编译输入**，不代表新 Container 目标布局。
+签名构建只使用仓外测试键、无效网络占位输入以及独立 build/sdkconfig。C3 使用已确认的现有 C3 样例分区；ESP32 的仓外 CSV 依据两份逐字节一致的 4 MiB Flash 只读备份：分区表位于 `0x8000`，`phy_init@0xf000/0x1000`、`otadata@0x10000/0x2000`、`nvs@0x12000/0xe000`、`at_customize` type `0x40`/subtype `0x00` `@0x20000/0xe0000`、`ota_0@0x100000/0x180000`、`ota_1@0x280000/0x180000`。固定 SDK 的官方分区解析器读回生成表与上述几何一致。该表只作为当前旧板的**离线编译输入**，不代表当前原生固件的目标布局。
 
-ESP32 当前 `otadata` 两扇区全 `0xff`，`ota_0` 是 2017 年 AT 固件，`ota_1` 全 `0xff`；它没有与本次临时 ECDSA 测试键匹配的签名运行与回退基线。离线签名、编译、镜像摘要和 host 假件不能证明现有 bootloader 可启动本次镜像，也不证明 OTA 下载、Flash 写入、运行时验签、确认或回滚。没有连接或写入两台设备，没有烧 eFuse、改生产密钥或替换分区。P5-04 至 P5-06 及 Base/Container 接入的设备验收仍待按五仓主计划执行。
+ESP32 当前 `otadata` 两扇区全 `0xff`，`ota_0` 是 2017 年 AT 固件，`ota_1` 全 `0xff`；它没有与本次临时 ECDSA 测试键匹配的签名运行与回退基线。离线签名、编译、镜像摘要和 host 假件不能证明现有 bootloader 可启动本次镜像，也不证明 OTA 下载、Flash 写入、运行时验签、确认或回滚。没有连接或写入两台设备，没有烧 eFuse、改生产密钥或替换分区。Base 接入与双目标设备验收仍须按[原生业务与固件 OTA 计划](https://github.com/esp-space/esp-base/blob/master/docs/operations/ota-allocation-diagnostic-checkpoint.md)的当轮前置执行，不能继承这些离线构建资格。
 
 ## P6 首次擦除前的 OTA 请求静态校验（2026-09-27）
 
-联合 Container 升级会在 `eota_prepare` 下载前先退役旧备用应用槽。原 `eota_preflight(policy, size, slots)` 只检查槽状态和容量，1 字节请求也可通过；原 `eota_prepare` 到后续阶段才按镜像头最小长度拒绝它。现在公开 `eota_validate_image_request(image)`，只检查原有 HTTPS URL 规则和 `esp_image_header_t + esp_image_segment_header_t + esp_app_desc_t` 的最小长度，不碰 policy、网络、Flash 或槽。调用方须在第一次退役旧镜像前调用；`eota_prepare` 也调用同一入口。授权、槽容量、摘要和实际签名镜像仍分别由调用方、preflight 与准备/选择阶段核对。
+调用方在 `eota_prepare` 下载前需要退役旧备用应用槽时，必须先完成请求静态校验。原 `eota_preflight(policy, size, slots)` 只检查槽状态和容量，1 字节请求也可通过；原 `eota_prepare` 到后续阶段才按镜像头最小长度拒绝它。现在公开 `eota_validate_image_request(image)`，只检查原有 HTTPS URL 规则和 `esp_image_header_t + esp_image_segment_header_t + esp_app_desc_t` 的最小长度，不碰 policy、网络、Flash 或槽。调用方须在第一次退役旧镜像前调用；`eota_prepare` 也调用同一入口。授权、槽容量、摘要和实际签名镜像仍分别由调用方、preflight 与准备/选择阶段核对。
 
 | 验证 | 结果 | 边界 |
 | --- | --- | --- |
@@ -192,4 +192,4 @@ ESP32 生成的**未签名**分区表前 3072 字节与该板旧 AT 恢复件同
 
 当前源码的 AppleClang ASan/UBSan 加固定 SDK mbedTLS 4.1 真实 HTTPS 回环 CTest **6/6** 通过；C3 与 ESP32 两套直接编译生产 `update.c` 的假件均断言连续写入模式。SDK 锁检查通过。仓外无效网络占位输入和仅用于离线构建的临时测试键，分别产出 C3 RSA v2 `0x111000` B、SHA-256 `ae7667e0e13c503ef4d9416271aa24572bd3d1272b54ede2108deb181fe3916f`，以及 ESP32 ECDSA v1 `0xffff4` B、SHA-256 `c425a9713599cf9a341d6b27bef79d9f8628a18f0670d7ed26e7b225c803322a`；官方 `espsecure verify-signature` 两目标均通过，两个 ELF 均含 `eota_prepare`、`eota_select` 与 SDK `esp_ota_begin`。ESP32 使用仓外旧 AT 几何仅供签名链接，首次因先前默认构建的 sdkconfig 保留通用分区设置而被构建门拒绝；改用隔离 `SDKCONFIG` 后才取得上述结果。
 
-这只移除 OTA 准备阶段一次性整镜像擦除。OTA app/otadata 写入与读取、Base NVS/Container 包区、FRP scratch 尚未全部使用同一短时 I/O 仲裁；SDK 的单次写入、验签及清理调用也不能由本库抢占。没有运行该镜像、写设备或实测 FRP 大记录并存、Flash 延迟与耐久；P5-04、P6-03、P4-05 和 P7 的对应验收不因此关闭。
+这只移除 OTA 准备阶段一次性整镜像擦除。OTA app/otadata 写入与读取、Base NVS、FRP scratch 尚未全部使用同一短时 I/O 仲裁；SDK 的单次写入、验签及清理调用也不能由本库抢占。没有运行该镜像、写设备或实测 FRP 大记录并存、Flash 延迟与耐久；P5-04、P6-03、P4-05 和 P7 的对应验收不因此关闭。
