@@ -14,3 +14,4 @@
 /examples/esp32/dependencies.lock
 /examples/esp32/managed_components/
 /examples/esp32/lab_inputs.h
+__pycache__/
