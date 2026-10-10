@@ -21,7 +21,7 @@ flowchart LR
     idf --> real_ota
 ```
 
-从仓根运行 `cmake -S . -B build -DBUILD_TESTING=ON && cmake --build build && (cd build && ctest --output-on-failure)`。 仓根 CTest 同时注册 `sdk_source`，使用 Python3 和 Git 验证独立完整对象库、正常 absorbed submodule、linked worktree、Git 元数据/对象符号链接及无原生绑定 Git 定位文件借用拒绝及被 ignore 配置隐藏的递归脏内容；这项来源回归不替代 SDK 或设备构建。AppleClang 可增加 `-DCMAKE_C_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer'` 与相同 linker flags。`update_test` 用假件模拟 SDK 调用内的慢滴流与升级故障；`http_deadline_test` 用可控单调时钟验证迟到字节不得刷新旧无进展期限、持续进展不得延长总期限及时钟异常。`http_transport_test` 编译真实 transport 源码，配 DNS/TLS 假件与本地 TCP 服务复现 DNS 迟到回调、连接故障和请求/响应读写。慢握手、慢写、持续读取与连续 TLS 票据通过假 TLS 单步推进单调时钟，核对精确期限和返回值；读取用例先把真实本地 socket 数据送达，再进入计时阶段，避免宿主线程调度耗尽测试预算。
+从仓根运行 `cmake -S . -B build -DBUILD_TESTING=ON && cmake --build build && ctest --test-dir build --output-on-failure`。 CTest 的 `sdk_guard` 用本仓 Python reader 和真实临时 Git checkout 验证正式 SDK 派生清单、官方原文与实际源码、索引和子模块；独立准备正测只映射到本地 Git 来源，检查路径不下载或执行 SDK 脚本。未装配旧 SDK、清单漂移、链接、部分修改、额外修改及错误来源均须拒绝；这些夹具不授予真实 SDK 构建或设备资格。AppleClang 可增加 `-DCMAKE_C_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer'` 与相同 linker flags。`update_test` 用假件模拟 SDK 调用内的慢滴流与升级故障；`http_deadline_test` 用可控单调时钟验证迟到字节不得刷新旧无进展期限、持续进展不得延长总期限及时钟异常。`http_transport_test` 编译真实 transport 源码，配 DNS/TLS 假件与本地 TCP 服务复现 DNS 迟到回调、连接故障和请求/响应读写。慢握手、慢写、持续读取与连续 TLS 票据通过假 TLS 单步推进单调时钟，核对精确期限和返回值；读取用例先把真实本地 socket 数据送达，再进入计时阶段，避免宿主线程调度耗尽测试预算。
 
 `update_test` 与 `update_esp32` 分别用官方芯片 ID `0x0005` 和 `0x0000` 编译相同真实更新源码与完整故障矩阵，检查零值 ESP32 ID 可通过预检、无效哨兵 `0xffff` 被拒。selector 假件按固定 IDF 语义把每次 `esp_ota_set_boot_partition` 的新 active 状态置为 NEW：验证目标已切换与 boot 仍指旧槽两种返回失败路径；恢复旧槽时重置为 VALID、清除未启动候选的 NEW 记录、预检可再次通过；恢复状态或清除记录失败则报告 boot 状态不确定。另用同一份已准备镜像在选槽前切换项目名、芯片 ID 与 SDK 镜像头约束，要求不进入 boot selector。它还在槽预检、擦除、写入、HTTP 清理、分区读回和验签调用中推进假单调时钟，验证逾期后不再产出准备结果或执行切槽；槽预检耗尽总期限时不得创建网络客户端或写 Flash。`ota_test` 验证 UNTRACKED 状态不能冒充已确认的 pending 镜像。
 
@@ -44,3 +44,5 @@ flowchart LR
 共享工厂故障矩阵另外覆盖无可信时间、空或已过期期限、零连接预算、句柄／上下文分配与两个注册步骤失败后的释放；`http_no_time_date` 和 `http_no_certificate_bundle` 分别编译真实工厂并证明缺失必要 TLS 配置时拒绝创建。这些测试复用原 DNS／TCP／TLS 源码和私有进展函数，不开放新的网络刷新接口。
 
 有界入站流回归在 `update`／`update_esp32` 两套真实源码中覆盖：完整精确输入与准备／选槽分离、缺 callback／短尺寸／超槽尺寸／无可信时间的提前拒绝，首字节／镜像头／正文／尾字节截断或断流，额外字节、数量越界、缺 EOF、错目标／摘要／签名和 SDK 完整镜像尺寸不符。可控时钟核对重试不刷新 idle、三个输入阶段各在 30 秒到期、持续数据不延长 300 秒总期限、剩余不足单次预算时传更短 timeout，以及 999,999 µs 的合法返回与 1,000,000 µs 的迟到字节拒绝。Flash 获取／释放、begin／write／读回失败和慢 Flash 返回均不得留下可选收据，输入／进度期间没有 claim；HTTP 初始化计数保持零。测试使用原有 SDK／PSA 假件，不能替代 FRP 真实认证／framing／并发预算、实体签名与掉电验收。
+
+真实 SDK 工具回归同时保留完整来源对象、HEAD／index／实际字节、递归子模块及 sparse／promisor 最终布尔值检查；ignored 内容不能因 Git 干净状态通过。固件与设备验收仍独立执行。

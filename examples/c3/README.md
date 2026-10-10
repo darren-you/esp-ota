@@ -18,7 +18,7 @@ flowchart LR
 准备锁定 SDK 后进行**只编译**验证：
 
 ```bash
-python3 ../../components/esp_ota/tools/check_sdk.py --path "$IDF_PATH"
+python3 ../../components/esp_ota/tools/sdk.py check --path "$IDF_PATH"
 idf.py -C . build
 ```
 

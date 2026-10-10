@@ -46,7 +46,7 @@ flowchart LR
 ```bash
 cmake -S . -B build -DBUILD_TESTING=ON
 cmake --build build
-(cd build && ctest --output-on-failure)
+ctest --test-dir build --output-on-failure
 ```
 
 有锁定 SDK 后，可另跑真实 mbedTLS HTTPS 回环：
@@ -54,20 +54,25 @@ cmake --build build
 ```bash
 cmake -S . -B build-real-https -DBUILD_TESTING=ON -DEOTA_REAL_HTTPS_TEST=ON
 cmake --build build-real-https
-(cd build-real-https && ctest --output-on-failure)
+ctest --test-dir build-real-https --output-on-failure
 ```
 
 此入口读取 `IDF_PATH`、核对 `sdk-lock.json`，并使用本机 Python 与 OpenSSL 生成临时测试 CA；不会连接外网或设备。
 
-IDF 组件位于 `components/esp_ota`，`idf_component.yml` 固定 ESP-IDF 6.1.0；[SDK 锁](components/esp_ota/sdk-lock.json)还固定公开 ESP-IDF 受控来源 `fb53f8a76df5ea913715658f5ac602e91a094e72` 和公开 `esp-lwip` 提交。原业务基线从官方 `fff9895c82d744c7237be8847347bdd1b07c6643` 派生，修复 `esp_ota_begin` 擦除失败后的句柄泄漏，以及 HTTP 客户端初始化时内建 TCP／TLS transport 注册失败后的句柄泄漏。构建守卫核对两份源码和 lwIP 以外的干净状态，防止用另一套 SDK 误报组合结果。SDK 根元数据必须归属来源自身；absorbed 子模块只接受根自有 Git modules 和准确 core.worktree 绑定，独立子模块保留自身 `.git`。校验拒绝外置元数据、Git 环境重定向、replace/grafts 历史替换，Git 命令显式禁用对象替换。签名 OTA 消费者还须启用 `CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y`；样例默认配置已启用。`CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` 在本组件的 IDF 构建中明确拒绝，因为 SDK 的确认入口在该配置下可能写 eFuse。已备好锁定 SDK 后：
+IDF 组件位于 `components/esp_ota`，`idf_component.yml` 固定 ESP-IDF 6.1.0；[SDK 锁](components/esp_ota/sdk-lock.json)还固定公开 ESP-IDF fork `578cf89c343e388db43ba1f4ddcd602fedcb763c` 和公开 `esp-lwip` 提交。fork 从官方 `fff9895c82d744c7237be8847347bdd1b07c6643` 派生，修复 `esp_ota_begin` 擦除失败后的句柄泄漏，以及 HTTP 客户端初始化时内建 TCP／TLS transport 注册失败后的句柄泄漏。正式 SDK 还必须采用本组件锁定的 ESP Base 容量统计派生：组件锁只记录唯一 recipe 的公开来源、精确提交和完整摘要；TLSF、两份修改及每个文件的原文／派生摘要只由该 recipe 声明。SDK 根 `esp-sdk-derivation.json` 与冻结 recipe 逐字相同；构建守卫先核完整清单摘要，再核实际源码、索引和全部子模块，不接受未装配的旧 SDK、部分修改、额外修改或另一份清单。检查不下载、不执行 SDK 内脚本，也不从相邻 Base checkout 导入代码。签名 OTA 消费者还须启用 `CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y`；样例默认配置已启用。`CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` 在本组件的 IDF 构建中明确拒绝，因为 SDK 的确认入口在该配置下可能写 eFuse。已备好锁定 SDK 后：
 
 ```bash
-python3 components/esp_ota/tools/check_sdk.py --path "$IDF_PATH"
+export PYTHONDONTWRITEBYTECODE=1
+python3 components/esp_ota/tools/sdk.py prepare --path "$HOME/.espressif/frameworks/esp-ota-idf"
+# 另按该 SDK 官方入口安装工具链并导出 IDF_PATH。
+python3 components/esp_ota/tools/sdk.py check --path "$IDF_PATH"
 idf.py -C examples/c3 build
 idf.py -C examples/esp32 -B build-esp32 build
 ```
 
 [共用样例源码](examples/common/README.md)分别装配到 [独立 C3 样例](examples/c3/README.md)与 [独立 ESP32 样例](examples/esp32/README.md)。C3 保持已核对的 4 MiB 双应用槽事实；ESP32 默认只读编译，不假定第二台设备的分区。两者默认都不写 Flash 或 otadata；受控测试需要各板仓外输入、受控签名构建、已授权设备和恢复基线。编译、host 假件和临时测试键都不授权刷板、改分区、eFuse 或生产密钥操作。新分区布局须另行验证后由调用方更新可信约束。
+
+SDK 准备只创建新路径，下载精确官方基线与冻结 recipe 的数据和两份修改，先完成全部原文及 apply 检查，再写唯一派生清单；不执行 Base 构建或下载检查脚本。已有路径和失败现场保持，`check` 不负责修复。独立真实 Git 守卫回归为 `python3 -B -m unittest discover -s components/esp_ota/tools/tests -p test_sdk.py`，并进入仓根 CTest；软件守卫通过不授予容量、设备升级或回滚资格。
 
 ## 当前验证边界
 
@@ -81,4 +86,7 @@ idf.py -C examples/esp32 -B build-esp32 build
 
 当前双目标离线构建与验签结果见[开发检查点](docs/operations/development-checkpoint.md)；C3 的历史签名验证见 [P5-03 签名构建复验](docs/verification/p5-03-signed-c3.md)。
 
-SDK 的 Actions 退出来源以原 `esp-space/esp-idf@578cf89c343e388db43ba1f4ddcd602fedcb763c` 为业务基线，只追加源码退出与实际嵌套来源绑定；受控来源的 `workspace-source.json` 保留精确上游追溯。lwIP 锁需在源码退出 PR 合入 `darren-you/esp-lwip` canonical `master` 后再选择精确版本，当前不使用未合并任务 head；源码变更不代表固件、Broker、实板或发布已完成。
+
+来源检查使用完整原生 Git 对象、HEAD 原始树、索引，以及实际源码字节、类型、执行位和符号链接目标；逐个递归来源拒绝 shallow／partial／sparse、缺失或被改写对象、借用对象库、外置或无绑定元数据、replace／grafts、Git 来源环境重定向，以及包括 ignored 在内的所有未跟踪内容。absorbed 子模块只接受根来源自身的 Git modules 与原生 core.worktree 绑定；独立子模块保留自身 `.git`。sparse／promisor 按 Git 作用域、include 和原生布尔语义核对最终有效值，完整来源允许有效的 false，partial clone filter 标记仍拒绝。`prepare` 完整取得根与递归精确 gitlink，不使用 shallow 获取；唯一 stamp 为 `0400` 的普通文件，其内容与冻结 recipe 逐字相同。
+
+从 SDK 安装与导出前设置 `PYTHONDONTWRITEBYTECODE=1`，后续 `idf.py`、CMake 和独立 Ninja／`cmake --build` 保留该环境，避免 SDK 来源出现 Python 缓存；来源检查仍拒绝所有 ignored 内容。真实临时 Git 回归同时核对 schema2 派生与这些严格来源边界，不下载真实 SDK，不授予固件、Broker、双板容量或实板资格。
