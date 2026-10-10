@@ -62,6 +62,7 @@ ctest --test-dir build-real-https --output-on-failure
 IDF 组件位于 `components/esp_ota`，`idf_component.yml` 固定 ESP-IDF 6.1.0；[SDK 锁](components/esp_ota/sdk-lock.json)还固定公开 ESP-IDF fork `578cf89c343e388db43ba1f4ddcd602fedcb763c` 和公开 `esp-lwip` 提交。fork 从官方 `fff9895c82d744c7237be8847347bdd1b07c6643` 派生，修复 `esp_ota_begin` 擦除失败后的句柄泄漏，以及 HTTP 客户端初始化时内建 TCP／TLS transport 注册失败后的句柄泄漏。正式 SDK 还必须采用本组件锁定的 ESP Base 容量统计派生：组件锁只记录唯一 recipe 的公开来源、精确提交和完整摘要；TLSF、两份修改及每个文件的原文／派生摘要只由该 recipe 声明。SDK 根 `esp-sdk-derivation.json` 与冻结 recipe 逐字相同；构建守卫先核完整清单摘要，再核实际源码、索引和全部子模块，不接受未装配的旧 SDK、部分修改、额外修改或另一份清单。检查不下载、不执行 SDK 内脚本，也不从相邻 Base checkout 导入代码。签名 OTA 消费者还须启用 `CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y`；样例默认配置已启用。`CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` 在本组件的 IDF 构建中明确拒绝，因为 SDK 的确认入口在该配置下可能写 eFuse。已备好锁定 SDK 后：
 
 ```bash
+export PYTHONDONTWRITEBYTECODE=1
 python3 components/esp_ota/tools/sdk.py prepare --path "$HOME/.espressif/frameworks/esp-ota-idf"
 # 另按该 SDK 官方入口安装工具链并导出 IDF_PATH。
 python3 components/esp_ota/tools/sdk.py check --path "$IDF_PATH"
@@ -84,3 +85,12 @@ SDK 准备只创建新路径，下载精确官方基线与冻结 recipe 的数�
 共用样例显式使用 RAM Wi-Fi 存储；本轮武装离线构建与真实链接复核见[样例检查点](docs/operations/ram-wifi-sample-checkpoint.md)。
 
 当前双目标离线构建与验签结果见[开发检查点](docs/operations/development-checkpoint.md)；C3 的历史签名验证见 [P5-03 签名构建复验](docs/verification/p5-03-signed-c3.md)。
+
+
+来源检查使用完整原生 Git 对象、HEAD 原始树、索引，以及实际源码字节、类型、执行位和符号链接目标；逐个递归来源拒绝 shallow／partial／sparse、缺失或被改写对象、借用对象库、外置或无绑定元数据、replace／grafts、Git 来源环境重定向，以及包括 ignored 在内的所有未跟踪内容。absorbed 子模块只接受根来源自身的 Git modules 与原生 core.worktree 绑定；独立子模块保留自身 `.git`。sparse／promisor 按 Git 作用域、include 和原生布尔语义核对最终有效值，完整来源允许有效的 false，partial clone filter 标记仍拒绝。`prepare` 完整取得根与递归精确 gitlink，不使用 shallow 获取；唯一 stamp 为 `0400` 的普通文件，其内容与冻结 recipe 逐字相同。
+
+从 SDK 安装与导出前设置 `PYTHONDONTWRITEBYTECODE=1`，后续 `idf.py`、CMake 和独立 Ninja／`cmake --build` 保留该环境，避免 SDK 来源出现 Python 缓存；来源检查仍拒绝所有 ignored 内容。真实临时 Git 回归同时核对 schema2 派生与这些严格来源边界，不下载真实 SDK，不授予固件、Broker、双板容量或实板资格。
+
+IDF 与 lwIP 的原始唯一 origin 和 Git 实际 fetch 身份必须与配方相同；支持对应 canonical HTTPS／SSH 写法，不改写来源配置。来源检查仅消费原始对象、索引与文件，不运行内容转换的 status／diff 或 Shell 子模块入口；全部 Git 命令显式禁用 fsmonitor 与 hooks，recipe fetch 不执行模板或实际配置中的事务 hook。容量补丁装配前用原生 NUL 路径输入读取每个实际补丁文件的有效 filter 属性，只拒绝被该路径选中的非空 clean／smudge／process 驱动；未被受管补丁路径使用的 Git LFS 等注册允许保留。 `set`／`unset`／`unspecified` 的布尔或未设属性与同名字面驱动用关闭该驱动的原生空数据判别区分；判别不执行外部程序、不写 Git 对象或源码，同名真实绑定仍拒绝。全部配方仓库的受管路径检查完成后才执行首次 `git apply`，不让外部命令改写已核对的源码。新 SDK 的原生 init／checkout／递归子模块 update 与 recipe 临时仓 init 单独隔离宿主 system／global／调用者注入配置及模板，并禁用 hooks，覆盖仅在新子仓 Git 目录才生效的条件 filter 和模板事务 hook；不修改宿主配置。recipe 的 fetch、读取、独立 fetch 与全部来源／origin／promisor 校验仍按实际配置作用域执行；递归 update 自身的公开子仓 fetch 属于同一隔离操作。实际命中补丁路径的恶意条件配置仍由后续真实装配门拒绝，拒绝不等于完整 SDK 准备成功。
+
+容量补丁首写前通过原生 `git check-attr` 核对全部受管路径的实际 worktree／info／global／system 属性；会改写原始字节的 CRLF、非 UTF-8 工作树编码，以及受管内容中的 `$Id$` 展开均拒绝。`git apply --check` 与实际 apply 单独固定 `core.autocrlf=false`、`core.eol=lf`，不改变来源读取与 origin／promisor 的实际配置作用域；安全 LF、未设转换、禁用 text 及 UTF-8 不因此拒绝。失败拒绝发生在两仓任何受管文件或 stamp 首写之前。
