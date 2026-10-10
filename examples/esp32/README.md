@@ -16,7 +16,7 @@ flowchart LR
 只读编译入口：
 
 ```bash
-python3 ../../components/esp_ota/tools/check_sdk.py --path "$IDF_PATH"
+python3 ../../components/esp_ota/tools/sdk.py check --path "$IDF_PATH"
 idf.py -C . -B build-esp32 build
 ```
 

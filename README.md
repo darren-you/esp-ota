@@ -59,15 +59,19 @@ ctest --test-dir build-real-https --output-on-failure
 
 此入口读取 `IDF_PATH`、核对 `sdk-lock.json`，并使用本机 Python 与 OpenSSL 生成临时测试 CA；不会连接外网或设备。
 
-IDF 组件位于 `components/esp_ota`，`idf_component.yml` 固定 ESP-IDF 6.1.0；[SDK 锁](components/esp_ota/sdk-lock.json)还固定公开 ESP-IDF fork `578cf89c343e388db43ba1f4ddcd602fedcb763c` 和公开 `esp-lwip` 提交。fork 从官方 `fff9895c82d744c7237be8847347bdd1b07c6643` 派生，修复 `esp_ota_begin` 擦除失败后的句柄泄漏，以及 HTTP 客户端初始化时内建 TCP／TLS transport 注册失败后的句柄泄漏。构建守卫核对两份源码和 lwIP 以外的干净状态，防止用另一套 SDK 误报组合结果。签名 OTA 消费者还须启用 `CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y`；样例默认配置已启用。`CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` 在本组件的 IDF 构建中明确拒绝，因为 SDK 的确认入口在该配置下可能写 eFuse。已备好锁定 SDK 后：
+IDF 组件位于 `components/esp_ota`，`idf_component.yml` 固定 ESP-IDF 6.1.0；[SDK 锁](components/esp_ota/sdk-lock.json)还固定公开 ESP-IDF fork `578cf89c343e388db43ba1f4ddcd602fedcb763c` 和公开 `esp-lwip` 提交。fork 从官方 `fff9895c82d744c7237be8847347bdd1b07c6643` 派生，修复 `esp_ota_begin` 擦除失败后的句柄泄漏，以及 HTTP 客户端初始化时内建 TCP／TLS transport 注册失败后的句柄泄漏。正式 SDK 还必须采用本组件锁定的 ESP Base 容量统计派生：组件锁只记录唯一 recipe 的公开来源、精确提交和完整摘要；TLSF、两份修改及每个文件的原文／派生摘要只由该 recipe 声明。SDK 根 `esp-sdk-derivation.json` 与冻结 recipe 逐字相同；构建守卫先核完整清单摘要，再核实际源码、索引和全部子模块，不接受未装配的旧 SDK、部分修改、额外修改或另一份清单。检查不下载、不执行 SDK 内脚本，也不从相邻 Base checkout 导入代码。签名 OTA 消费者还须启用 `CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y`；样例默认配置已启用。`CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` 在本组件的 IDF 构建中明确拒绝，因为 SDK 的确认入口在该配置下可能写 eFuse。已备好锁定 SDK 后：
 
 ```bash
-python3 components/esp_ota/tools/check_sdk.py --path "$IDF_PATH"
+python3 components/esp_ota/tools/sdk.py prepare --path "$HOME/.espressif/frameworks/esp-ota-idf"
+# 另按该 SDK 官方入口安装工具链并导出 IDF_PATH。
+python3 components/esp_ota/tools/sdk.py check --path "$IDF_PATH"
 idf.py -C examples/c3 build
 idf.py -C examples/esp32 -B build-esp32 build
 ```
 
 [共用样例源码](examples/common/README.md)分别装配到 [独立 C3 样例](examples/c3/README.md)与 [独立 ESP32 样例](examples/esp32/README.md)。C3 保持已核对的 4 MiB 双应用槽事实；ESP32 默认只读编译，不假定第二台设备的分区。两者默认都不写 Flash 或 otadata；受控测试需要各板仓外输入、受控签名构建、已授权设备和恢复基线。编译、host 假件和临时测试键都不授权刷板、改分区、eFuse 或生产密钥操作。新分区布局须另行验证后由调用方更新可信约束。
+
+SDK 准备只创建新路径，下载精确官方基线与冻结 recipe 的数据和两份修改，先完成全部原文及 apply 检查，再写唯一派生清单；不执行 Base 构建或下载检查脚本。已有路径和失败现场保持，`check` 不负责修复。独立真实 Git 守卫回归为 `python3 -B -m unittest discover -s components/esp_ota/tools/tests -p test_sdk.py`，并进入仓根 CTest；软件守卫通过不授予容量、设备升级或回滚资格。
 
 ## 当前验证边界
 

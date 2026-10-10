@@ -7,8 +7,8 @@ if(NOT EXISTS "${EOTA_IDF_MBEDTLS}/mbedtls/CMakeLists.txt")
 endif()
 find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 execute_process(COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_SOURCE_DIR}/components/esp_ota/tools/check_sdk.py"
-    --path "$ENV{IDF_PATH}"
+    "${CMAKE_SOURCE_DIR}/components/esp_ota/tools/sdk.py"
+    check --path "$ENV{IDF_PATH}" --quiet
     RESULT_VARIABLE eota_sdk_result
     OUTPUT_VARIABLE eota_sdk_output
     ERROR_VARIABLE eota_sdk_error)
