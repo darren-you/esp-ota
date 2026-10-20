@@ -1,5 +1,9 @@
 # ESP OTA
 
+组件产品版本以 `components/esp_ota/idf_component.yml` 的 `1.0.0` 为唯一声明，host CMake 从它派生；SDK 与签名协议版本保持原义。
+
+本组件目前由消费者按完整 Git 提交与 Component Manager 锁装配源码，host 静态库和实验样例属于验证／组合构建，没有独立生产二进制分发入口。源码清单归一不代表消费者已经升级，也不改变原锁定提交、上游版本或历史测试结果；真实固件仍由所属产品负责版本、构建号和签名验收。
+
 `esp-ota` 是独立的 ESP-IDF 签名应用升级组件。`components/esp_ota` 提供 `eota_` API，使用官方 `esp_http_client`、`app_update`、分区和 PSA SHA-256；应用继续负责授权、持久操作收据、业务静止、自检窗口和重启。当前处于开发阶段，host 故障测试与双目标离线构建不代表实板升级已验收。
 
 ## 架构拓扑

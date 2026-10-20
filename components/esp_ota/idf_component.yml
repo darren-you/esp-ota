@@ -1,4 +1,4 @@
-version: "0.1.0"
+version: "1.0.0"
 description: "Signed ESP-IDF app OTA preparation, slot selection and confirmation"
 url: "https://github.com/darren-you/esp-ota"
 repository: "https://github.com/darren-you/esp-ota.git"
