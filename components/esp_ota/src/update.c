@@ -522,6 +522,7 @@ eota_result_t eota_retire_inactive(const eota_policy_t *policy,
 typedef struct {
     int (*read)(void *context, uint8_t *buffer, size_t capacity);
     bool (*finish)(void *context);
+    bool (*written)(void *context, uint32_t written, uint32_t total);
     void *context;
 } eota_input_t;
 
@@ -540,6 +541,7 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
     uint8_t write_buffer[1024];
     size_t write_used = 0;
     uint32_t received = 0;
+    uint32_t written = 0;
     while (received < image_size_bytes) {
         if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
         const uint32_t left = image_size_bytes - received;
@@ -569,6 +571,9 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
                     goto abort;
                 }
                 if (write != ESP_OK) goto abort;
+                if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
+                written += (uint32_t)write_used;
+                if (input->written && !input->written(input->context, written, image_size_bytes)) goto abort;
                 if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
                 write_used = 0;
             }
@@ -614,6 +619,9 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
             goto abort;
         }
         if (write != ESP_OK) goto abort;
+        if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
+        written += (uint32_t)write_used;
+        if (input->written && !input->written(input->context, written, image_size_bytes)) goto abort;
     }
     if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
     uint8_t digest[EOTA_SHA256_BYTES];
@@ -711,6 +719,13 @@ static bool finish_stream_input(void *context)
     } while (count == EOTA_STREAM_READ_TIMEOUT);
     return count == 0;
 }
+
+static bool written_stream_input(void *context, uint32_t written, uint32_t total)
+{
+    eota_stream_input_t *input = context;
+    return !input->stream->written ||
+        input->stream->written(input->stream->context, written, total);
+}
 #endif
 
 eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *image,
@@ -799,6 +814,7 @@ eota_result_t eota_prepare_stream(const eota_policy_t *policy, const eota_stream
     eota_stream_input_t source = {.stream = stream, .policy = policy, .deadline = &deadline};
     const eota_input_t input = {
         .read = read_stream_input, .finish = finish_stream_input, .context = &source,
+        .written = written_stream_input,
     };
     return receive_image(policy, stream->image_size_bytes, stream->sha256, &deadline,
                             &slots, target, &input, progress, context, prepared);

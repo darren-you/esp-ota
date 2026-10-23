@@ -15,7 +15,7 @@ flowchart LR
     api --> preflight["preflight：运行槽、目标槽与产品约束"]
     api --> identity["verified image：验签与完整镜像摘要"]
     api --> prepare["prepare / prepare_stream：HTTPS或有界输入、镜像头、顺序写槽与完整核验"]
-    caller_stream["调用方已认证FRP入站流：精确长度、背压与结束帧"] --> prepare
+    caller_stream["调用方已认证有界输入流：精确长度、背压与结束帧"] --> prepare
     api --> select["select：重新读回摘要、产品目标、签名和 boot selector"]
     api --> confirm["inspect / confirm / reject：pending 槽确认或回滚"]
     prepare --> transport["http_transport：异步 DNS、非阻塞 TCP / TLS、请求与响应"]
@@ -39,7 +39,7 @@ flowchart LR
 
 旧备用镜像首次擦除前，调用方还须用 `eota_validate_image_request` 静态检查新请求的 HTTPS URL 和最小镜像头长度。`eota_prepare` 复用这一检查；槽预检仍单独核对可信 policy、实际状态和分区容量。
 
-`eota_prepare_stream` 从调用方拥有的 `eota_stream_t.read` 接收完整签名固件，固定单次最多 64 B、顺序写缓冲 1024 B 和镜像头缓冲；不申请整镜像 RAM 或第三 Flash 副本。精确长度之后要求来源明确返回 framing／FIN 的 EOF；截断、额外字节、断流、错摘要、错签名及逾期都清空准备结果且不切槽。每次读取传入至多 policy 的单次预算，重试不刷新无进展期限，迟到数据拒绝；5 秒隧道建立由调用方负责，1 秒读取、30 秒无进展和 300 秒会话总期限由实际 policy 装配。输入流、认证、HTTP framing、连接关闭和流预算仍由消费者管理；库不能抢占阻塞 callback。实现和本轮软件证据见[入站流检查点](docs/operations/inbound_stream_checkpoint.md)。
+`eota_prepare_stream` 从调用方拥有的 `eota_stream_t.read` 接收完整签名固件，固定单次最多 64 B、顺序写缓冲 1024 B 和镜像头缓冲；不申请整镜像 RAM 或第三 Flash 副本。精确长度之后要求来源明确返回 EOF；截断、额外字节、断流、错摘要、错签名及逾期都清空准备结果且不切槽。可选 `written` 回调仅在顺序 Flash 写成功并释放短 claim 后报告实际写入字节；尾块须在 EOF 后写入，拒绝回调会终止准备。它不表示整镜像验签、切槽或持久升级成功。每次读取传入至多 policy 的单次预算，重试不刷新无进展期限，迟到数据拒绝；连接、认证、帧结束与流预算由消费者管理。1 秒读取、30 秒无进展和 300 秒会话总期限由实际 policy 装配，库不能抢占阻塞 callback。历史入站流软件证据见[检查点](docs/operations/inbound_stream_checkpoint.md)，当前调用合同见 [API 说明](docs/design/api-contract.md)。
 
 公开 `include/eota_http_transport.h` 现在允许其他 HTTPS 消费者复用既有期限与 DNS／TCP／TLS 机制，调用方保有期限对象并按 HTTP cleanup、transport destroy、owner release 顺序回收；授权、来源长度、Flash 与持久化策略仍由各 HTTPS 调用方负责。接口与验证边界见[API 说明](docs/design/api-contract.md#共享-https-传输机制)及[共享期限检查点](docs/operations/shared-http-deadline-checkpoint.md)。
 

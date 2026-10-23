@@ -72,6 +72,14 @@ typedef struct {
     void *context;
     uint8_t sha256[EOTA_SHA256_BYTES];
     uint32_t image_size_bytes;
+    /* Optional, synchronous notification after a successful sequential Flash
+     * write AND successful short-gate release. This is a byte-write ACK, not
+     * image validation, selection or durable success. The final partial write
+     * follows explicit EOF. No gate is held; the callback must not block.
+     * Returning false aborts preparation without selecting a slot. Unlike
+     * eota_progress_t, this never includes bytes still in the write buffer.
+     * Zero-initialize this source struct when no callback is needed. */
+    bool (*written)(void *context, uint32_t written, uint32_t total);
 } eota_stream_t;
 
 typedef struct {

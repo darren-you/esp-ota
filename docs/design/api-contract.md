@@ -26,7 +26,9 @@ IDF v6.1 的 HTTP header、发送与响应体方法都可能在单次调用内�
 
 ## 调用方有界入站流
 
-`eota_stream_t` 只包含 `read`、借用的 `context`、完整 signed bin 的 `image_size_bytes` 和 `sha256`。`eota_validate_stream_request` 在任何写入前静态核对 callback 与镜像最小长度；它不读取网络、分区或 Flash。`eota_prepare_stream` 与 HTTPS 共用同一个顺序写入、目标头、完整摘要、官方签名和精确 signed 长度的准备核心，不创建 socket、TLS transport 或额外 Flash 文件，也不选择 boot 槽。
+`eota_stream_t` 包含 `read`、借用的 `context`、完整 signed bin 的 `image_size_bytes` 和 `sha256`，以及可空 `written` 回调。调用方零初始化整个结构；没有提供 `written` 时保留原行为。`eota_validate_stream_request` 在任何写入前静态核对 read callback 与镜像最小长度；它不读取网络、分区或 Flash。`eota_prepare_stream` 与 HTTPS 共用同一个顺序写入、目标头、完整摘要、官方签名和精确 signed 长度的准备核心，不创建 socket、TLS transport 或额外 Flash 文件，也不选择 boot 槽。
+
+`written(context, written_bytes, total_bytes)` 仅在该次 `esp_ota_write` 成功、短 Flash claim 成功释放且期限仍有效后同步调用，累计值只包含实际顺序写入的字节。回调期间不持有 claim，不能阻塞或重入 OTA；返回 false 中止准备并清空可选槽收据。写入失败、释放不确定或写调用返回已逾期时不发出该次确认。最后不足 1024 B 的尾缓冲先验证明确 EOF，再写入并确认。原 `progress` 表示输入已消费，可能包含尚未写入的字节，不能用于 MQTT 应用落盘 ACK；`written` 也只证明字节写调用完成，不证明完整摘要、签名、选槽或持久升级成功。
 
 `read(context, buffer, capacity, timeout_ms)` 返回 `1..capacity` 字节；`0` 只表示来源已经证明的 framing／FIN 结束，`EOTA_STREAM_READ_TIMEOUT`（`-2`）表示可重试等待，其他负数表示输入失败。库每次最多要求 64 B，累计满镜像头后才允许开始 Flash 写入，主体使用固定 1024 B 顺序写缓冲。达到声明长度后额外读取 1 B，必须得到明确 EOF；额外字节、结束帧之前的断流和没有 EOF 的超时均拒绝。callback 不能因“已读 image_size_bytes”就伪造 EOF：HTTP 来源必须在写前证明 Content-Length 与完整镜像尺寸一致，拒绝 chunked、请求体拼接和 pipelining；FRP／USB 来源必须使用实际协议结束边界。
 

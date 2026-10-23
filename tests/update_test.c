@@ -704,9 +704,27 @@ typedef struct {
     int retry_reads;
     int calls;
     int eof_calls;
+    uint32_t written_offset;
+    unsigned written_calls;
+    bool reject_write_ack;
+    int64_t write_ack_elapsed_us;
     int64_t read_elapsed_us;
     uint32_t shortest_timeout_ms;
 } stream_fixture_t;
+
+static bool written_firmware_stream(void *context, uint32_t written, uint32_t total)
+{
+    stream_fixture_t *source = context;
+    assert(!flash_gate_active && total == IMAGE_BYTES);
+    assert(written == staged_size && written <= source->offset && written > source->written_offset);
+    assert(!memcmp(staged_bytes, image_bytes, written));
+    if (written == IMAGE_BYTES) assert(source->eof_calls == 1);
+    else assert(written == 1024 && source->eof_calls == 0);
+    source->written_offset = written;
+    ++source->written_calls;
+    advance_time(source->write_ack_elapsed_us);
+    return !source->reject_write_ack;
+}
 
 static int read_firmware_stream(void *context, uint8_t *buffer, size_t capacity,
                                  uint32_t timeout_ms)
@@ -752,6 +770,7 @@ static eota_stream_t make_firmware_stream(stream_fixture_t *source)
     digest(&image);
     eota_stream_t stream = {
         .read = read_firmware_stream, .context = source, .image_size_bytes = IMAGE_BYTES,
+        .written = written_firmware_stream,
     };
     memcpy(stream.sha256, image.sha256, sizeof stream.sha256);
     return stream;
@@ -776,11 +795,26 @@ static void test_firmware_stream(void)
     eota_stream_t stream = make_firmware_stream(&source);
     assert(eota_validate_stream_request(&stream) == EOTA_UPDATE_OK);
     assert(eota_prepare_stream(&policy, &stream, progress, NULL, &prepared) == EOTA_UPDATE_OK);
+    assert(source.written_offset == IMAGE_BYTES && source.written_calls == 2);
     assert(prepared.image_size_bytes == IMAGE_BYTES && source.eof_calls == 1 &&
            staged_size == IMAGE_BYTES && memcmp(staged_bytes, image_bytes, IMAGE_BYTES) == 0 &&
            init_calls == 0 && transport_create_calls == 0 && begin_calls == 1 &&
            end_calls == 1 && abort_calls == 0 && select_calls == 0 && boot == &old_slot);
     assert(eota_select(&policy, &prepared) == EOTA_UPDATE_OK && boot == &new_slot);
+
+    reset(); stream = make_firmware_stream(&source); stream.written = NULL;
+    assert(eota_prepare_stream(&policy, &stream, progress, NULL, &prepared) == EOTA_UPDATE_OK);
+    assert(source.written_calls == 0);
+    reset(); stream = make_firmware_stream(&source); source.reject_write_ack = true;
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(source.written_calls == 1 && source.written_offset == 1024 && abort_calls == 1);
+    reset(); stream = make_firmware_stream(&source); source.write_ack_elapsed_us = INT64_C(30000000);
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(source.written_calls == 1 && abort_calls == 1);
+
+    reset(); stream = make_firmware_stream(&source); use_flash_gate(); flash_gate_fail_release_at = 3;
+    assert_failed_stream(&stream, EOTA_UPDATE_BOOT_STATE_UNKNOWN);
+    assert(write_calls == 1 && staged_size == 1024 && source.written_calls == 0 && abort_calls == 1);
 
     /* Reject all malformed requests before invoking the input or Flash. */
     reset(); stream = make_firmware_stream(&source);
@@ -884,7 +918,7 @@ static void test_firmware_stream(void)
     assert(begin_calls == 1 && abort_calls == 0);
     reset(); stream = make_firmware_stream(&source); fail_write = true;
     assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
-    assert(write_calls == 1 && abort_calls == 1);
+    assert(write_calls == 1 && abort_calls == 1 && source.written_calls == 0);
     reset(); stream = make_firmware_stream(&source); fail_read = true;
     assert_failed_stream(&stream, EOTA_UPDATE_RESOURCE_FAILURE);
     assert(partition_reads == 1 && abort_calls == 1);
