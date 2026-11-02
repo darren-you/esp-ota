@@ -47,3 +47,13 @@ bool eota_http_deadline_progress(eota_http_deadline_t *deadline)
     deadline->last_progress_us = now_us;
     return true;
 }
+
+bool eota_http_deadline_written(eota_http_deadline_t *deadline)
+{
+    if (deadline == NULL) return false;
+    const int64_t now_us = esp_timer_get_time();
+    if (eota_http_deadline_remaining_us_at(deadline, now_us) <= 0) return false;
+    deadline->started_us = now_us;
+    deadline->last_progress_us = now_us;
+    return true;
+}

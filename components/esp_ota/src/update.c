@@ -524,6 +524,7 @@ typedef struct {
     bool (*finish)(void *context);
     bool (*written)(void *context, uint32_t written, uint32_t total);
     void *context;
+    bool renew_total_on_write;
 } eota_input_t;
 
 static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_size_bytes,
@@ -574,6 +575,7 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
                 if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
                 written += (uint32_t)write_used;
                 if (input->written && !input->written(input->context, written, image_size_bytes)) goto abort;
+                if (input->renew_total_on_write && !eota_http_deadline_written(deadline)) goto abort;
                 if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
                 write_used = 0;
             }
@@ -622,6 +624,7 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
         if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
         written += (uint32_t)write_used;
         if (input->written && !input->written(input->context, written, image_size_bytes)) goto abort;
+        if (input->renew_total_on_write && !eota_http_deadline_written(deadline)) goto abort;
     }
     if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
     uint8_t digest[EOTA_SHA256_BYTES];
@@ -815,6 +818,7 @@ eota_result_t eota_prepare_stream(const eota_policy_t *policy, const eota_stream
     const eota_input_t input = {
         .read = read_stream_input, .finish = finish_stream_input, .context = &source,
         .written = written_stream_input,
+        .renew_total_on_write = stream->renew_total_on_write,
     };
     return receive_image(policy, stream->image_size_bytes, stream->sha256, &deadline,
                             &slots, target, &input, progress, context, prepared);

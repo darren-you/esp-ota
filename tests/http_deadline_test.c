@@ -50,5 +50,20 @@ int main(void)
     assert(eota_http_deadline_remaining_us(&deadline) == 0);
     assert(!eota_http_deadline_progress(&deadline));
 
-    puts("  monotonic idle and total deadlines passed");
+    /* The writer may opt in to 600-second renewable budgets. Ordinary
+     * progress above still leaves the absolute total deadline unchanged. */
+    now_us = 0;
+    assert(eota_http_deadline_init(&deadline, 600000, 30000));
+    for (int i = 1; i <= 30; ++i) {
+        now_us = (int64_t)i * 29000000;
+        assert(eota_http_deadline_written(&deadline));
+    }
+    assert(now_us > INT64_C(600000000));
+    now_us += 30000000;
+    assert(!eota_http_deadline_written(&deadline));
+    assert(!eota_http_deadline_written(NULL));
+    now_us = deadline.started_us - 1;
+    assert(!eota_http_deadline_written(&deadline));
+
+    puts("  monotonic idle, absolute and write-renewed budgets passed");
 }
