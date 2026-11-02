@@ -62,8 +62,10 @@ typedef struct {
 
 /* read returns 1..capacity bytes, zero only for an explicit end of input,
  * EOTA_STREAM_READ_TIMEOUT for a retryable wait, and any other negative value
- * for a broken input. Each call must return within timeout_ms; the library
- * checks elapsed time but cannot interrupt a blocked callback. The caller owns
+ * for a broken input. Limit each wait to timeout_ms; data/EOF returned at or
+ * after that budget are rejected. A late empty timeout may retry while the
+ * unchanged session deadline remains valid; it never counts as progress.
+ * The library cannot interrupt a blocked callback. The caller owns
  * authentication, connection establishment, framing and closing the stream.
  * EOF must reflect actual framing/FIN, never only image_size_bytes. */
 #define EOTA_STREAM_READ_TIMEOUT (-2)

@@ -705,7 +705,11 @@ static int read_stream_input(void *context, uint8_t *buffer, size_t capacity)
     const int count = input->stream->read(input->stream->context, buffer, capacity, timeout_ms);
     const int64_t finished_us = esp_timer_get_time();
     const int64_t elapsed_us = finished_us - started_us;
-    if (finished_us < started_us || elapsed_us > (int64_t)timeout_ms * 1000 ||
+    /* An empty timeout can resume late after yielding to another task. It
+     * consumed no input and must not turn scheduler latency into a stream
+     * failure. Keep the original session deadline; never count it as progress.
+     * Data and EOF still have to arrive inside the granted read budget. */
+    if (finished_us < started_us ||
         eota_http_deadline_remaining_us(input->deadline) <= 0 ||
         (count != EOTA_STREAM_READ_TIMEOUT && elapsed_us >= (int64_t)timeout_ms * 1000) ||
         (count > 0 && (size_t)count > capacity)) return -1;

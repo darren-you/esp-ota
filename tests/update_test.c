@@ -702,6 +702,8 @@ typedef struct {
     bool wait_after_prefix;
     bool wait_at_eof;
     int retry_reads;
+    size_t retry_after_offset;
+    int64_t retry_elapsed_us;
     int calls;
     int eof_calls;
     uint32_t written_offset;
@@ -735,9 +737,10 @@ static int read_firmware_stream(void *context, uint8_t *buffer, size_t capacity,
     assert(!flash_gate_active);
     ++source->calls;
     if (timeout_ms < source->shortest_timeout_ms) source->shortest_timeout_ms = timeout_ms;
-    if (source->retry_reads > 0) {
+    if (source->retry_reads > 0 && source->offset >= source->retry_after_offset) {
         --source->retry_reads;
-        advance_time((int64_t)timeout_ms * 1000);
+        advance_time(source->retry_elapsed_us ? source->retry_elapsed_us :
+                     (int64_t)timeout_ms * 1000);
         return EOTA_STREAM_READ_TIMEOUT;
     }
     if (source->wait_before_body ||
@@ -879,6 +882,54 @@ static void test_firmware_stream(void)
     reset(); stream = make_firmware_stream(&source); source.retry_reads = 2;
     assert(eota_prepare_stream(&policy, &stream, progress, NULL, &prepared) == EOTA_UPDATE_OK);
     assert(now_us == INT64_C(2000000) && abort_calls == 0);
+    /* A task can resume late after an empty wait. No bytes were consumed;
+     * retry under the unchanged idle/total deadline instead of treating
+     * scheduler latency as a broken stream. Include the two board readings. */
+    const int64_t late_empty_us[] = {1000001, 1838414, 3523360};
+    const size_t retry_offsets[] = {0, PREFIX_BYTES, IMAGE_BYTES};
+    for (int unlimited = 0; unlimited <= 1; ++unlimited) {
+        for (size_t phase = 0; phase < 3; ++phase) {
+            for (size_t delay = 0; delay < 3; ++delay) {
+                reset(); stream = make_firmware_stream(&source);
+                stream.no_total_timeout = unlimited;
+                source.retry_reads = 1;
+                source.retry_after_offset = retry_offsets[phase];
+                source.retry_elapsed_us = late_empty_us[delay];
+                assert(eota_prepare_stream(&policy, &stream, progress, NULL, &prepared) == EOTA_UPDATE_OK);
+                assert(now_us == late_empty_us[delay] && abort_calls == 0 &&
+                       source.written_offset == IMAGE_BYTES && source.eof_calls == 1);
+            }
+            for (int beyond = 0; beyond <= 1; ++beyond) {
+                reset(); stream = make_firmware_stream(&source);
+                stream.no_total_timeout = unlimited;
+                source.retry_reads = 1;
+                source.retry_after_offset = retry_offsets[phase];
+                source.retry_elapsed_us = INT64_C(30000000) + beyond;
+                assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+                assert(now_us == source.retry_elapsed_us && end_calls == 0 &&
+                       source.eof_calls == 0 && abort_calls == (phase > 0 ? 1 : 0));
+            }
+        }
+        reset(); stream = make_firmware_stream(&source);
+        stream.no_total_timeout = unlimited;
+        source.retry_reads = 9;
+        source.retry_elapsed_us = 3523360;
+        assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+        assert(source.calls == 9 && begin_calls == 0 && now_us == INT64_C(31710240));
+    }
+    /* With a shorter total budget, an empty retry still cannot renew it. */
+    reset(); stream = make_firmware_stream(&source);
+    source.chunk = 64; source.read_elapsed_us = 50000;
+    source.retry_reads = 1; source.retry_after_offset = IMAGE_BYTES;
+    source.retry_elapsed_us = INT64_C(1500000);
+    eota_policy_t retry_policy = policy;
+    retry_policy.connect_timeout_ms = 1000;
+    retry_policy.idle_timeout_ms = 2000;
+    retry_policy.total_timeout_ms = 2000;
+    assert(eota_prepare_stream(&retry_policy, &stream, progress, NULL, &prepared) == EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert_cleared_prepared(&prepared);
+    assert(source.offset == IMAGE_BYTES && begin_calls == 1 && abort_calls == 1 &&
+           end_calls == 0 && select_calls == 0 && source.eof_calls == 0);
     for (int phase = 0; phase < 3; ++phase) {
         reset(); stream = make_firmware_stream(&source);
         source.wait_before_body = phase == 0;
