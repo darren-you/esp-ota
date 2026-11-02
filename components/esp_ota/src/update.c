@@ -524,7 +524,7 @@ typedef struct {
     bool (*finish)(void *context);
     bool (*written)(void *context, uint32_t written, uint32_t total);
     void *context;
-    bool renew_total_on_write;
+    bool no_total_timeout;
 } eota_input_t;
 
 static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_size_bytes,
@@ -575,7 +575,7 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
                 if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
                 written += (uint32_t)write_used;
                 if (input->written && !input->written(input->context, written, image_size_bytes)) goto abort;
-                if (input->renew_total_on_write && !eota_http_deadline_written(deadline)) goto abort;
+                if (input->no_total_timeout && !eota_http_deadline_progress(deadline)) goto abort;
                 if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
                 write_used = 0;
             }
@@ -624,7 +624,7 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
         if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
         written += (uint32_t)write_used;
         if (input->written && !input->written(input->context, written, image_size_bytes)) goto abort;
-        if (input->renew_total_on_write && !eota_http_deadline_written(deadline)) goto abort;
+        if (input->no_total_timeout && !eota_http_deadline_progress(deadline)) goto abort;
     }
     if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
     uint8_t digest[EOTA_SHA256_BYTES];
@@ -709,7 +709,8 @@ static int read_stream_input(void *context, uint8_t *buffer, size_t capacity)
         eota_http_deadline_remaining_us(input->deadline) <= 0 ||
         (count != EOTA_STREAM_READ_TIMEOUT && elapsed_us >= (int64_t)timeout_ms * 1000) ||
         (count > 0 && (size_t)count > capacity)) return -1;
-    if (count > 0 && !eota_http_deadline_progress(input->deadline)) return -1;
+    if (count > 0 && !input->stream->no_total_timeout &&
+        !eota_http_deadline_progress(input->deadline)) return -1;
     return count;
 }
 
@@ -806,7 +807,7 @@ eota_result_t eota_prepare_stream(const eota_policy_t *policy, const eota_stream
     const eota_result_t request_result = eota_validate_stream_request(stream);
     if (request_result != EOTA_UPDATE_OK) return request_result;
     eota_http_deadline_t deadline = {0};
-    if (!eota_http_deadline_init(&deadline, policy->total_timeout_ms,
+    if (!eota_http_deadline_init(&deadline, stream->no_total_timeout ? 0 : policy->total_timeout_ms,
                                  policy->idle_timeout_ms)) return EOTA_UPDATE_RESOURCE_FAILURE;
     eota_slots_t slots;
     const esp_partition_t *target = NULL;
@@ -818,7 +819,7 @@ eota_result_t eota_prepare_stream(const eota_policy_t *policy, const eota_stream
     const eota_input_t input = {
         .read = read_stream_input, .finish = finish_stream_input, .context = &source,
         .written = written_stream_input,
-        .renew_total_on_write = stream->renew_total_on_write,
+        .no_total_timeout = stream->no_total_timeout,
     };
     return receive_image(policy, stream->image_size_bytes, stream->sha256, &deadline,
                             &slots, target, &input, progress, context, prepared);

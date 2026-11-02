@@ -16,6 +16,7 @@ typedef struct {
     uint32_t idle_timeout_ms;
 } eota_http_deadline_t;
 
+/* A zero total timeout disables only the total limit; idle remains mandatory. */
 bool eota_http_deadline_init(eota_http_deadline_t *deadline,
     uint32_t total_timeout_ms, uint32_t idle_timeout_ms);
 int64_t eota_http_deadline_remaining_us(const eota_http_deadline_t *deadline);

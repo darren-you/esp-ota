@@ -888,38 +888,40 @@ static void test_firmware_stream(void)
         assert(now_us == INT64_C(30000000) && end_calls == 0);
         assert(abort_calls == (phase > 0 ? 1 : 0));
     }
-    for (int renew = 0; renew <= 1; ++renew) {
+    for (int unlimited = 0; unlimited <= 1; ++unlimited) {
         reset(); stream = make_firmware_stream(&source);
-        stream.renew_total_on_write = renew;
+        stream.no_total_timeout = unlimited;
         source.chunk = 1; source.read_elapsed_us = 900000;
         assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
-        assert(now_us == INT64_C(300600000) && source.shortest_timeout_ms == 300 &&
-               source.offset < IMAGE_BYTES && abort_calls == 1 && source.written_calls == 0);
+        assert(now_us == (unlimited ? INT64_C(30600000) : INT64_C(300600000)) &&
+               source.shortest_timeout_ms == 300 && source.offset < IMAGE_BYTES &&
+               source.written_calls == 0);
+        assert(abort_calls == (unlimited ? 0 : 1));
     }
-    /* Same real writer and slow stream: only successful writes allow crossing
-     * the initial total deadline. Reads alone retain the absolute contract. */
+    /* Same writer and slow stream: idle-only succeeds past the policy total,
+     * while the default absolute contract still refuses the same transfer. */
     eota_policy_t short_policy = policy;
     short_policy.total_timeout_ms = 17000;
-    short_policy.idle_timeout_ms = 5000;
-    for (int renew = 0; renew <= 1; ++renew) {
+    short_policy.idle_timeout_ms = 16000;
+    for (int unlimited = 0; unlimited <= 1; ++unlimited) {
         reset(); stream = make_firmware_stream(&source);
-        stream.renew_total_on_write = renew;
+        stream.no_total_timeout = unlimited;
         source.chunk = 64;
         source.read_elapsed_us = 900000;
         const eota_result_t result = eota_prepare_stream(&short_policy, &stream, progress, NULL, &prepared);
-        if (result != (renew ? EOTA_UPDATE_OK : EOTA_UPDATE_DOWNLOAD_FAILED))
-            fprintf(stderr, "renew=%d result=%d now_us=%lld written_calls=%u offset=%zu\n",
-                    renew, result, (long long)now_us, source.written_calls, source.offset);
-        assert(result == (renew ? EOTA_UPDATE_OK : EOTA_UPDATE_DOWNLOAD_FAILED));
+        if (result != (unlimited ? EOTA_UPDATE_OK : EOTA_UPDATE_DOWNLOAD_FAILED))
+            fprintf(stderr, "unlimited=%d result=%d now_us=%lld written_calls=%u offset=%zu\n",
+                    unlimited, result, (long long)now_us, source.written_calls, source.offset);
+        assert(result == (unlimited ? EOTA_UPDATE_OK : EOTA_UPDATE_DOWNLOAD_FAILED));
         assert(select_calls == 0 && boot == &old_slot);
-        if (renew) assert(now_us > INT64_C(17000000) && source.written_calls == 2);
+        if (unlimited) assert(now_us > INT64_C(17000000) && source.written_calls == 2);
         else assert_cleared_prepared(&prepared);
     }
-    reset(); stream = make_firmware_stream(&source); stream.renew_total_on_write = true;
+    reset(); stream = make_firmware_stream(&source); stream.no_total_timeout = true;
     source.wait_after_prefix = true;
     assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
     assert(now_us == INT64_C(30000000));
-    reset(); stream = make_firmware_stream(&source); stream.renew_total_on_write = true;
+    reset(); stream = make_firmware_stream(&source); stream.no_total_timeout = true;
     source.write_ack_elapsed_us = 30000000;
     assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
     assert(source.written_calls == 1 && end_calls == 0);

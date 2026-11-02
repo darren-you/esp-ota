@@ -80,11 +80,11 @@ typedef struct {
      * eota_progress_t, this never includes bytes still in the write buffer.
      * Zero-initialize this source struct when no callback is needed. */
     bool (*written)(void *context, uint32_t written, uint32_t total);
-    /* Opt in to renewing the policy total budget only after a successful
-     * Flash write, gate release and written callback. Reads, retries and
-     * connection activity never renew it; the idle budget still applies.
-     * False preserves the absolute total deadline. */
-    bool renew_total_on_write;
+    /* Disable the total transfer limit. In this mode only successful Flash
+     * writes, gate release and written callback completion refresh idle.
+     * Reads, retries and connection activity cannot hide a stalled writer.
+     * False preserves the absolute total deadline and read-progress idle. */
+    bool no_total_timeout;
 } eota_stream_t;
 
 typedef struct {

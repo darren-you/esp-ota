@@ -15,7 +15,6 @@ int main(void)
 {
     eota_http_deadline_t deadline;
     assert(!eota_http_deadline_init(NULL, 300, 30));
-    assert(!eota_http_deadline_init(&deadline, 0, 30));
     assert(!eota_http_deadline_init(&deadline, 300, 0));
     assert(eota_http_deadline_init(&deadline, 30, 300));
     assert(eota_http_deadline_remaining_us(&deadline) == 30000);
@@ -50,20 +49,19 @@ int main(void)
     assert(eota_http_deadline_remaining_us(&deadline) == 0);
     assert(!eota_http_deadline_progress(&deadline));
 
-    /* The writer may opt in to 600-second renewable budgets. Ordinary
-     * progress above still leaves the absolute total deadline unchanged. */
+    /* Idle-only mode has no lifetime cap, and expired idle cannot revive. */
     now_us = 0;
-    assert(eota_http_deadline_init(&deadline, 600000, 30000));
+    assert(eota_http_deadline_init(&deadline, 0, 30000));
     for (int i = 1; i <= 30; ++i) {
         now_us = (int64_t)i * 29000000;
-        assert(eota_http_deadline_written(&deadline));
+        assert(eota_http_deadline_progress(&deadline));
     }
     assert(now_us > INT64_C(600000000));
     now_us += 30000000;
-    assert(!eota_http_deadline_written(&deadline));
-    assert(!eota_http_deadline_written(NULL));
+    assert(!eota_http_deadline_progress(&deadline));
+    assert(!eota_http_deadline_progress(NULL));
     now_us = deadline.started_us - 1;
-    assert(!eota_http_deadline_written(&deadline));
+    assert(!eota_http_deadline_progress(&deadline));
 
-    puts("  monotonic idle, absolute and write-renewed budgets passed");
+    puts("  monotonic idle-only and absolute deadlines passed");
 }
