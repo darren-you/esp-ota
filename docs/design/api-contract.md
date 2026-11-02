@@ -4,6 +4,10 @@
 
 与其他 Flash 使用者共存的调用方在 policy 的 `flash_io` 中提供成对的 `acquire`／`release` 和上下文；只给一个回调的 policy 无效。调用方负责同一物理芯片的 owner、精确分区／范围校验与有界等待。库在退役目标首扇区及 otadata、开始 OTA、每次顺序写入、结束验签与尾写、选择 boot 槽及失败恢复写入前获取短 claim，调用返回立即释放；获取失败不发起该次写入，释放失败报告持久状态不明。HTTPS 请求、响应等待和进度回调均不持有该 claim。没有其他 Flash 使用者的独立样例可不绑定回调；`eota_confirm_pending`／`eota_reject_pending` 与业务 NVS 由调用方在同一个 owner 下单独保护。
 
+`eota_policy_t.observer` 是可空的同步只读阶段通知，不改变结果、调度、超时或 Flash claim。`observe(context, stage, active)` 只在实际 SDK 调用前后成对触发；失败返回也触发结束，未发起的调用不触发。阶段 1—8 分别对应备用首扇区擦除、OTA begin、顺序 app write、显式完整镜像验签、OTA end、boot selector、mark-valid、inactive otadata 失效。`app_write` 可以包含 SDK 的逐扇区擦除，`end`／selector 可以混合验签与元数据更新；标记圈定的是调用包围区间，包含边界与调度间隙，不能视为实体 Flash 电脉冲或纯验签 CPU 耗时。摘要读取、网络等待和只读槽查询不伪装成写入阶段。默认全零保留原行为；调用方自有 NVS 等阶段号须与本枚举分开维护。
+
+回调位于调用方短 Flash claim 内，只允许有界整数状态复制；不得等待、分配、打印、调用 MQTT 或重入 OTA。它不提供新的抢占、暂停或队列机制，也不能替代实例/操作身份与实时资源采样。`eota_confirm_pending_observed(current, observer)` 保留原确认及读回结果，仅包围实际 `esp_ota_mark_app_valid_cancel_rollback`；原 `eota_confirm_pending` 委托空 observer，已 VALID 或提前拒绝时没有确认阶段。确认/回滚的 Flash 仲裁仍由应用负责。
+
 调用方在首次退役旧备用镜像前必须调用 `eota_validate_image_request(image)`。它只按与 `eota_prepare` 相同的规则检查 HTTPS URL（包括非空主机、方括号主机和可选端口的基本结构）及至少容纳 IDF 镜像头、首段头和应用描述的请求长度；不读取 policy、槽、网络或 Flash，不验证授权、SHA、签名、DNS 解析或实际镜像内容。普通未签名构建返回 `EOTA_UPDATE_UNSUPPORTED`。此静态检查成功后，调用方仍须执行槽预检、持久收据和实际镜像状态对账。
 
 1. 应用核对请求授权、当前业务状态、网络与可信时间；用 `eota_preflight(policy, size, slots)` 核对可写安全条件并取得真实运行/目标槽、大小和状态。`eota_observe_slots` 是只读事实接口，即使 boot selector 与运行槽不一致也报告实际槽和镜像状态，供跨启动结果查询。应用在首次目标槽写入前持久提交操作收据并精确读回。

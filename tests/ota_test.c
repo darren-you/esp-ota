@@ -16,9 +16,19 @@ static esp_err_t rollback_result = ESP_ERR_OTA_ROLLBACK_FAILED;
 static esp_ota_img_states_t state_after_rollback = ESP_OTA_IMG_PENDING_VERIFY;
 static unsigned rollback_calls;
 static bool partition_available = true;
+static bool observed_active, observation_enabled;
+static unsigned observed_begins, observed_ends;
+static void observe_confirmation(void *context, uint32_t stage, bool active)
+{
+    assert(context == &mark_calls && stage == EOTA_STAGE_BOOT_CONFIRM);
+    assert(observed_active != active);
+    observed_active = active;
+    if (active) ++observed_begins; else ++observed_ends;
+}
 
 const esp_partition_t *esp_ota_get_running_partition(void)
 {
+    assert(!observed_active);
     return partition_available ? &running : NULL;
 }
 
@@ -31,6 +41,7 @@ esp_err_t esp_ota_get_state_partition(const esp_partition_t *partition, esp_ota_
 
 esp_err_t esp_ota_mark_app_valid_cancel_rollback(void)
 {
+    assert(observed_active == observation_enabled);
     ++mark_calls;
     image_state = state_after_mark;
     return mark_result;
@@ -97,5 +108,25 @@ int main(void)
     assert(eota_reject_pending(&ota) == ESP_FAIL);
     assert(rollback_calls == 2 && ota.state == EOTA_STATE_INVALID);
 
+    const eota_observer_t observer = {.observe = observe_confirmation, .context = &mark_calls};
+    observation_enabled = true;
+    assert(eota_confirm_pending_observed(NULL, &observer) == ESP_ERR_INVALID_ARG);
+    inspect_result = ESP_FAIL;
+    assert(eota_confirm_pending_observed(&ota, &observer) == ESP_FAIL);
+    inspect_result = ESP_OK;
+    image_state = ESP_OTA_IMG_INVALID;
+    assert(eota_confirm_pending_observed(&ota, &observer) == ESP_ERR_INVALID_STATE);
+    assert(!observed_begins && !observed_ends);
+    image_state = ESP_OTA_IMG_PENDING_VERIFY;
+    mark_result = ESP_FAIL;
+    state_after_mark = ESP_OTA_IMG_PENDING_VERIFY;
+    assert(eota_confirm_pending_observed(&ota, &observer) == ESP_FAIL);
+    assert(observed_begins == 1 && observed_ends == 1 && !observed_active);
+    mark_result = ESP_OK;
+    state_after_mark = ESP_OTA_IMG_VALID;
+    assert(eota_confirm_pending_observed(&ota, &observer) == ESP_OK);
+    assert(observed_begins == 2 && observed_ends == 2 && !observed_active);
+    assert(eota_confirm_pending_observed(&ota, &observer) == ESP_OK);
+    assert(observed_begins == 2 && observed_ends == 2);
     puts("  ota_confirmation passed (SDK failures injected; no device write)");
 }

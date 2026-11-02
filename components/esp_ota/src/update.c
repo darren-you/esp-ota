@@ -74,6 +74,12 @@ static bool flash_io_release(const eota_policy_t *policy)
            policy->flash_io.release(policy->flash_io.context);
 }
 
+static void observe_call(const eota_policy_t *policy, eota_stage_t stage, bool active)
+{
+    if (policy->observer.observe)
+        policy->observer.observe(policy->observer.context, (uint32_t)stage, active);
+}
+
 static eota_result_t flash_read_partition(const eota_policy_t *policy,
                                           const esp_partition_t *partition,
                                           size_t offset, void *data, size_t size)
@@ -317,7 +323,9 @@ static eota_result_t verify_image_size(const eota_policy_t *policy,
      * tail beyond esp_ota_begin's erased range. Use verified SDK metadata;
      * esp_image_get_metadata omits the signature from its image_len. */
     if (!flash_io_acquire(policy)) return EOTA_UPDATE_RESOURCE_FAILURE;
+    observe_call(policy, EOTA_STAGE_IMAGE_VERIFY, true);
     const esp_err_t verified = esp_image_verify(ESP_IMAGE_VERIFY, &position, &metadata);
+    observe_call(policy, EOTA_STAGE_IMAGE_VERIFY, false);
     if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     if (deadline != NULL && eota_http_deadline_remaining_us(deadline) <= 0) {
         return EOTA_UPDATE_DOWNLOAD_FAILED;
@@ -474,9 +482,17 @@ eota_result_t eota_retire_inactive(const eota_policy_t *policy,
      * Only an erased first image sector (0xff magic) avoids a repeat erase
      * after reset. Invalidate otadata separately and inspect both facts. */
     if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
-    const esp_err_t erase = target_magic == 0xffU ? ESP_OK :
-        esp_partition_erase_range(target, 0, target->erase_size);
-    if (erase == ESP_OK) (void)esp_ota_invalidate_inactive_ota_data_slot();
+    esp_err_t erase = ESP_OK;
+    if (target_magic != 0xffU) {
+        observe_call(policy, EOTA_STAGE_INACTIVE_ERASE, true);
+        erase = esp_partition_erase_range(target, 0, target->erase_size);
+        observe_call(policy, EOTA_STAGE_INACTIVE_ERASE, false);
+    }
+    if (erase == ESP_OK) {
+        observe_call(policy, EOTA_STAGE_BOOT_INVALIDATE, true);
+        (void)esp_ota_invalidate_inactive_ota_data_slot();
+        observe_call(policy, EOTA_STAGE_BOOT_INVALIDATE, false);
+    }
     const bool released = flash_io_release(policy);
     if (erase != ESP_OK || !released) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
 
@@ -566,7 +582,9 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
                     result = EOTA_UPDATE_RESOURCE_FAILURE;
                     goto abort;
                 }
+                observe_call(policy, EOTA_STAGE_APP_WRITE, true);
                 const esp_err_t write = esp_ota_write(handle, write_buffer, write_used);
+                observe_call(policy, EOTA_STAGE_APP_WRITE, false);
                 if (!flash_io_release(policy)) {
                     result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
                     goto abort;
@@ -595,7 +613,9 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
                 result = EOTA_UPDATE_RESOURCE_FAILURE;
                 goto abort;
             }
+            observe_call(policy, EOTA_STAGE_BEGIN, true);
             const esp_err_t begin = esp_ota_begin(target, OTA_WITH_SEQUENTIAL_WRITES, &handle);
+            observe_call(policy, EOTA_STAGE_BEGIN, false);
             ota_started = begin == ESP_OK;
             if (!flash_io_release(policy)) {
                 result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
@@ -615,7 +635,9 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
             result = EOTA_UPDATE_RESOURCE_FAILURE;
             goto abort;
         }
+        observe_call(policy, EOTA_STAGE_APP_WRITE, true);
         const esp_err_t write = esp_ota_write(handle, write_buffer, write_used);
+        observe_call(policy, EOTA_STAGE_APP_WRITE, false);
         if (!flash_io_release(policy)) {
             result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
             goto abort;
@@ -638,7 +660,9 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
         result = EOTA_UPDATE_RESOURCE_FAILURE;
         goto abort;
     }
+    observe_call(policy, EOTA_STAGE_END_VERIFY, true);
     const esp_err_t finish = esp_ota_end(handle);
+    observe_call(policy, EOTA_STAGE_END_VERIFY, false);
     ota_started = false;
     if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     if (finish != ESP_OK) {
@@ -857,7 +881,9 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
     result = verify_image_size(policy, target, prepared->image_size_bytes, NULL);
     if (result != EOTA_UPDATE_OK) return result;
     if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    observe_call(policy, EOTA_STAGE_BOOT_SELECT, true);
     const esp_err_t select = esp_ota_set_boot_partition(target);
+    observe_call(policy, EOTA_STAGE_BOOT_SELECT, false);
     if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     const bool target_selected = same_partition(esp_ota_get_boot_partition(), target);
@@ -875,7 +901,9 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
     }
     if (!running_selected) {
         if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+        observe_call(policy, EOTA_STAGE_BOOT_SELECT, true);
         (void)esp_ota_set_boot_partition(running);
+        observe_call(policy, EOTA_STAGE_BOOT_SELECT, false);
         if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     }
     if (boot_matches(policy, running, &running_selected) != EOTA_UPDATE_OK ||
@@ -892,7 +920,9 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
         /* ESP-IDF marks a selected app NEW, including the old running app
          * when it is reselected after a failed target selection. */
         if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+        observe_call(policy, EOTA_STAGE_BOOT_CONFIRM, true);
         (void)esp_ota_mark_app_valid_cancel_rollback();
+        observe_call(policy, EOTA_STAGE_BOOT_CONFIRM, false);
         if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
         if (read_raw_state(policy, running, &running_state, &state_status) != EOTA_UPDATE_OK ||
             state_status != ESP_OK ||
@@ -910,7 +940,9 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
         (target_state == ESP_OTA_IMG_NEW || target_state == ESP_OTA_IMG_PENDING_VERIFY)) {
         /* The failed selection left an unbooted candidate in otadata. */
         if (!flash_io_acquire(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+        observe_call(policy, EOTA_STAGE_BOOT_INVALIDATE, true);
         (void)esp_ota_invalidate_inactive_ota_data_slot();
+        observe_call(policy, EOTA_STAGE_BOOT_INVALIDATE, false);
         if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     }
     eota_slots_t restored_slots;
@@ -968,7 +1000,9 @@ eota_result_t eota_sha256_verified_image(const eota_policy_t *policy, uint8_t su
     };
     esp_image_metadata_t metadata = {0};
     if (!flash_io_acquire(policy)) return EOTA_UPDATE_RESOURCE_FAILURE;
+    observe_call(policy, EOTA_STAGE_IMAGE_VERIFY, true);
     const esp_err_t verified = esp_image_verify(ESP_IMAGE_VERIFY, &position, &metadata);
+    observe_call(policy, EOTA_STAGE_IMAGE_VERIFY, false);
     if (!flash_io_release(policy)) return EOTA_UPDATE_BOOT_STATE_UNKNOWN;
     if (verified != ESP_OK) {
         return verified == ESP_ERR_NO_MEM || verified == ESP_ERR_IMAGE_FLASH_FAIL ?

@@ -19,6 +19,29 @@ typedef struct {
     void *context;
 } eota_flash_io_t;
 
+/* Optional synchronous observation of the actual SDK call envelope. The
+ * callback cannot alter the result. It runs inside the caller's Flash claim:
+ * no blocking, allocation, logging, MQTT calls or re-entry into eota_*. A
+ * begin is paired with end on every returning SDK call, including failure.
+ * Stages describe API calls, not physical Flash pulses or pure CPU time;
+ * write may erase sectors, end/select may also verify and update metadata.
+ * Zero initialization disables observation. Consumers may use their own
+ * stage IDs outside this enum when invoking their observer directly. */
+typedef enum {
+    EOTA_STAGE_INACTIVE_ERASE = 1,
+    EOTA_STAGE_BEGIN = 2,
+    EOTA_STAGE_APP_WRITE = 3,
+    EOTA_STAGE_IMAGE_VERIFY = 4,
+    EOTA_STAGE_END_VERIFY = 5,
+    EOTA_STAGE_BOOT_SELECT = 6,
+    EOTA_STAGE_BOOT_CONFIRM = 7,
+    EOTA_STAGE_BOOT_INVALIDATE = 8,
+} eota_stage_t;
+typedef struct {
+    void (*observe)(void *context, uint32_t stage, bool active);
+    void *context;
+} eota_observer_t;
+
 typedef enum {
     EOTA_STATE_UNKNOWN,
     EOTA_STATE_UNTRACKED,
@@ -51,6 +74,7 @@ typedef struct {
     /* Set only after the application has established a trusted clock. */
     bool trusted_time;
     eota_flash_io_t flash_io;
+    eota_observer_t observer;
 } eota_policy_t;
 
 typedef struct {
@@ -205,4 +229,8 @@ const char *eota_state_name(eota_state_t state);
 /* The application first completes its local self-test and stability window.
  * The SDK rollback call may reboot before returning. */
 esp_err_t eota_confirm_pending(eota_current_t *current);
+/* Same confirmation and readback, with an optional observer around only the
+ * SDK mark-valid call. The caller still owns Flash serialization. */
+esp_err_t eota_confirm_pending_observed(eota_current_t *current,
+                                       const eota_observer_t *observer);
 esp_err_t eota_reject_pending(eota_current_t *current);

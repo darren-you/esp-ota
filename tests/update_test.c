@@ -74,10 +74,27 @@ static void advance_time(int64_t delta_us)
     now_us += delta_us;
 }
 
+static uint32_t observed_stage, observed_begins, observed_ends;
+static void observe_sdk_call(void *context, uint32_t stage, bool active)
+{
+    assert(context == &policy && stage >= 1 && stage <= 8);
+    assert(!flash_gate_enabled || flash_gate_active);
+    if (active) { assert(observed_stage == 0); observed_stage = stage; ++observed_begins; }
+    else { assert(observed_stage == stage); observed_stage = 0; ++observed_ends; }
+}
+static void require_observed(uint32_t stage)
+{
+    if (policy.observer.observe) assert(observed_stage == stage);
+    else assert(observed_stage == 0);
+}
+
 static void reset(void)
 {
     assert(!fake_transport.alive && transport_create_calls == transport_destroy_calls);
     assert(!flash_gate_active);
+    assert(observed_stage == 0 && observed_begins == observed_ends);
+    observed_begins = observed_ends = 0;
+    policy.observer = (eota_observer_t){.observe = observe_sdk_call, .context = &policy};
     policy.flash_io = (eota_flash_io_t){0};
     flash_gate_enabled = false;
     flash_gate_acquires = flash_gate_releases = flash_gate_deny_at = 0;
@@ -249,6 +266,7 @@ esp_err_t esp_image_verify(esp_image_load_mode_t mode,
                            const esp_partition_pos_t *part,
                            esp_image_metadata_t *metadata)
 {
+    require_observed(4);
     assert(!flash_gate_enabled || flash_gate_active);
     assert(mode == ESP_IMAGE_VERIFY && part != NULL && metadata != NULL);
     assert((part->offset == old_slot.address && part->size == old_slot.size) ||
@@ -286,6 +304,7 @@ esp_err_t esp_ota_check_image_validity(int type, const esp_image_header_t *heade
 }
 esp_err_t esp_ota_begin(const esp_partition_t *partition, size_t size, esp_ota_handle_t *handle)
 {
+    require_observed(2);
     assert(!flash_gate_enabled || flash_gate_active);
     assert(partition == &new_slot && size == OTA_WITH_SEQUENTIAL_WRITES && staged_size == 0);
     ++begin_calls;
@@ -296,6 +315,7 @@ esp_err_t esp_ota_begin(const esp_partition_t *partition, size_t size, esp_ota_h
 }
 esp_err_t esp_ota_write(esp_ota_handle_t handle, const void *data, size_t size)
 {
+    require_observed(3);
     assert(!flash_gate_enabled || flash_gate_active);
     assert(handle == 1 && staged_size + size <= sizeof staged_bytes);
     ++write_calls;
@@ -306,11 +326,13 @@ esp_err_t esp_ota_write(esp_ota_handle_t handle, const void *data, size_t size)
     return ESP_OK;
 }
 esp_err_t esp_ota_end(esp_ota_handle_t handle)
-{ assert((!flash_gate_enabled || flash_gate_active) && handle == 1 && staged_size == IMAGE_BYTES); ++end_calls; advance_time(end_advance_us); return end_result; }
+{
+    require_observed(5); assert((!flash_gate_enabled || flash_gate_active) && handle == 1 && staged_size == IMAGE_BYTES); ++end_calls; advance_time(end_advance_us); return end_result; }
 esp_err_t esp_ota_abort(esp_ota_handle_t handle)
 { assert(handle == 1); ++abort_calls; return ESP_OK; }
 esp_err_t esp_ota_set_boot_partition(const esp_partition_t *partition)
 {
+    require_observed(6);
     assert(!flash_gate_enabled || flash_gate_active);
     if (partition == &new_slot) {
         ++select_calls;
@@ -335,6 +357,7 @@ esp_err_t esp_ota_set_boot_partition(const esp_partition_t *partition)
 }
 esp_err_t esp_ota_mark_app_valid_cancel_rollback(void)
 {
+    require_observed(7);
     assert(!flash_gate_enabled || flash_gate_active);
     ++mark_calls;
     if (!fail_mark) old_state = ESP_OTA_IMG_VALID;
@@ -342,6 +365,7 @@ esp_err_t esp_ota_mark_app_valid_cancel_rollback(void)
 }
 esp_err_t esp_ota_invalidate_inactive_ota_data_slot(void)
 {
+    require_observed(8);
     assert(!flash_gate_enabled || flash_gate_active);
     ++invalidate_calls;
     if (fail_invalidate) return ESP_FAIL;
@@ -371,6 +395,7 @@ esp_err_t esp_partition_read(const esp_partition_t *partition, size_t offset, vo
 }
 esp_err_t esp_partition_erase_range(const esp_partition_t *partition, size_t offset, size_t size)
 {
+    require_observed(1);
     assert(!flash_gate_enabled || flash_gate_active);
     assert(partition == (reverse_slots ? &old_slot : &new_slot) &&
            offset == 0 && size == partition->erase_size);
@@ -495,6 +520,7 @@ static bool release_flash_gate(void *context)
 {
     assert(context == &policy && flash_gate_active);
     ++flash_gate_releases;
+    assert(observed_stage == 0);
     flash_gate_active = false;
     return flash_gate_releases != flash_gate_fail_release_at;
 }
@@ -1274,6 +1300,8 @@ int main(void)
     assert(run_update(&request) == EOTA_UPDATE_BOOT_STATE_UNKNOWN && restore_calls == 1 && boot == &new_slot);
     assert(!fake_transport.alive && transport_create_calls == transport_destroy_calls);
 
+    reset(); digest(&request); policy.observer = (eota_observer_t){0};
+    assert(run_update(&request) == EOTA_UPDATE_OK && observed_begins == 0);
     test_flash_gate();
     test_firmware_stream();
     puts("  ota_update passed (EAGAIN return, prefix, hash, signature, selector recovery, Flash gate; fake SDK)");

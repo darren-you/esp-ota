@@ -82,6 +82,12 @@ esp_err_t eota_reject_pending(eota_current_t *ota)
 
 esp_err_t eota_confirm_pending(eota_current_t *ota)
 {
+    return eota_confirm_pending_observed(ota, NULL);
+}
+
+esp_err_t eota_confirm_pending_observed(eota_current_t *ota,
+                                       const eota_observer_t *observer)
+{
     if (ota == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -93,7 +99,11 @@ esp_err_t eota_confirm_pending(eota_current_t *ota)
     if (ota->state != EOTA_STATE_PENDING_VERIFY) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (observer && observer->observe)
+        observer->observe(observer->context, EOTA_STAGE_BOOT_CONFIRM, true);
     const esp_err_t result = esp_ota_mark_app_valid_cancel_rollback();
+    if (observer && observer->observe)
+        observer->observe(observer->context, EOTA_STAGE_BOOT_CONFIRM, false);
     const esp_err_t inspect_result = eota_inspect(ota);
     /* A write may have reached otadata even when the SDK reports failure.
      * The durable VALID state is the only successful confirmation fact. */
