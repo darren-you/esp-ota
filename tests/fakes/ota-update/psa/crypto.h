@@ -2,7 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 typedef int psa_status_t;
-typedef struct { uint32_t sum; } psa_hash_operation_t;
+typedef struct { uint32_t sum; size_t bytes; unsigned id; int active; } psa_hash_operation_t;
 #define PSA_HASH_OPERATION_INIT {0}
 #define PSA_SUCCESS 0
 #define PSA_ALG_SHA_256 1

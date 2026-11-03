@@ -559,6 +559,12 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
     size_t write_used = 0;
     uint32_t received = 0;
     uint32_t written = 0;
+    psa_hash_operation_t input_hash = PSA_HASH_OPERATION_INIT;
+    if (psa_crypto_init() != PSA_SUCCESS ||
+        psa_hash_setup(&input_hash, PSA_ALG_SHA_256) != PSA_SUCCESS) {
+        result = EOTA_UPDATE_RESOURCE_FAILURE;
+        goto abort;
+    }
     while (received < image_size_bytes) {
         if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
         const uint32_t left = image_size_bytes - received;
@@ -572,6 +578,13 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
         if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
         if (count == EOTA_STREAM_READ_TIMEOUT) continue;
         if (count <= 0 || (size_t)count > wanted) goto abort;
+        /* Hash each accepted input chunk before borrowing the read buffer
+         * again. This does not hold a Flash claim or count as write progress. */
+        if (psa_hash_update(&input_hash, buffer, (size_t)count) != PSA_SUCCESS) {
+            result = EOTA_UPDATE_RESOURCE_FAILURE;
+            goto abort;
+        }
+        if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
         if (received < sizeof prefix) {
             memcpy(prefix + received, buffer, (size_t)count);
         } else {
@@ -650,6 +663,20 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
     }
     if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
     uint8_t digest[EOTA_SHA256_BYTES];
+    size_t digest_size = 0;
+    if (psa_hash_finish(&input_hash, digest, sizeof digest, &digest_size) != PSA_SUCCESS ||
+        digest_size != sizeof digest) {
+        result = EOTA_UPDATE_RESOURCE_FAILURE;
+        goto abort;
+    }
+    (void)psa_hash_abort(&input_hash);
+    if (eota_http_deadline_remaining_us(deadline) <= 0) goto abort;
+    if (memcmp(digest, sha256, sizeof digest) != 0) {
+        result = EOTA_UPDATE_HASH_MISMATCH;
+        goto abort;
+    }
+    /* Input integrity does not prove the stored bytes: retain the independent
+     * bounded Flash readback and every subsequent SDK signature/size check. */
     result = hash_partition(policy, target, image_size_bytes, digest, deadline);
     if (result != EOTA_UPDATE_OK) goto abort;
     if (memcmp(digest, sha256, sizeof digest) != 0) {
@@ -676,6 +703,7 @@ static eota_result_t receive_image(const eota_policy_t *policy, uint32_t image_s
     memcpy(prepared->sha256, sha256, sizeof prepared->sha256);
     return EOTA_UPDATE_OK;
 abort:
+    (void)psa_hash_abort(&input_hash);
     if (ota_started) (void)esp_ota_abort(handle);
     return result;
 }

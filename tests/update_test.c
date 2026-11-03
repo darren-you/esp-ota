@@ -63,6 +63,11 @@ static uint32_t last_progress;
 static bool flash_gate_active, flash_gate_enabled;
 static int flash_gate_acquires, flash_gate_releases, flash_gate_deny_at;
 static int flash_gate_fail_release_at;
+static unsigned hash_setups, hash_updates, hash_finishes, hash_aborts, hash_live;
+static unsigned hash_fail_setup_at, hash_fail_finish_at;
+static size_t input_hashed_bytes, hash_fail_update_after;
+static bool crypto_init_failure, hash_bad_finish_size, corrupt_readback;
+static int64_t hash_update_advance_us, hash_finish_advance_us;
 struct esp_transport_fake {
     bool alive;
     eota_http_deadline_t *deadline;
@@ -92,6 +97,13 @@ static void reset(void)
 {
     assert(!fake_transport.alive && transport_create_calls == transport_destroy_calls);
     assert(!flash_gate_active);
+    assert(hash_live == 0);
+    hash_setups = hash_updates = hash_finishes = hash_aborts = 0;
+    hash_fail_setup_at = hash_fail_finish_at = 0;
+    input_hashed_bytes = 0;
+    hash_fail_update_after = SIZE_MAX;
+    crypto_init_failure = hash_bad_finish_size = corrupt_readback = false;
+    hash_update_advance_us = hash_finish_advance_us = 0;
     assert(observed_stage == 0 && observed_begins == observed_ends);
     observed_begins = observed_ends = 0;
     policy.observer = (eota_observer_t){.observe = observe_sdk_call, .context = &policy};
@@ -389,6 +401,7 @@ esp_err_t esp_partition_read(const esp_partition_t *partition, size_t offset, vo
         } else {
             assert(offset + size <= staged_size);
             memcpy(data, staged_bytes + offset, size);
+            if (corrupt_readback && offset == 0 && size > 0) ((uint8_t *)data)[0] ^= 1U;
         }
     }
     return ESP_OK;
@@ -490,13 +503,45 @@ bool esp_http_client_is_complete_data_received(esp_http_client_handle_t client)
 esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client)
 { assert(client && fake_transport.alive && cleanup_calls == 0); ++cleanup_calls; advance_time(cleanup_advance_us); return ESP_OK; }
 psa_status_t psa_hash_setup(psa_hash_operation_t *operation, int algorithm)
-{ assert(algorithm == PSA_ALG_SHA_256); operation->sum = 0; return PSA_SUCCESS; }
-psa_status_t psa_crypto_init(void) { return PSA_SUCCESS; }
+{
+    assert(algorithm == PSA_ALG_SHA_256 && !operation->active && !flash_gate_active);
+    *operation = (psa_hash_operation_t){.id = ++hash_setups, .active = 1};
+    ++hash_live;
+    /* Model an allocated provider state even on setup failure: abort is needed. */
+    return hash_setups == hash_fail_setup_at ? -1 : PSA_SUCCESS;
+}
+psa_status_t psa_crypto_init(void) { return crypto_init_failure ? -1 : PSA_SUCCESS; }
 psa_status_t psa_hash_update(psa_hash_operation_t *operation, const uint8_t *bytes, size_t length)
-{ for (size_t i = 0; i < length; ++i) operation->sum += bytes[i]; return PSA_SUCCESS; }
+{
+    assert(operation->active && !flash_gate_active);
+    ++hash_updates;
+    if (operation->id == 1 && operation->bytes >= hash_fail_update_after) return -1;
+    for (size_t i = 0; i < length; ++i) operation->sum += bytes[i];
+    operation->bytes += length;
+    if (operation->id == 1) input_hashed_bytes = operation->bytes;
+    advance_time(hash_update_advance_us);
+    return PSA_SUCCESS;
+}
 psa_status_t psa_hash_finish(psa_hash_operation_t *operation, uint8_t *out, size_t out_size, size_t *actual)
-{ assert(out_size == 32); for (size_t i = 0; i < 32; ++i) out[i] = (uint8_t)(operation->sum + i); *actual = 32; return PSA_SUCCESS; }
-psa_status_t psa_hash_abort(psa_hash_operation_t *operation) { (void)operation; return PSA_SUCCESS; }
+{
+    assert(operation->active && out_size == 32 && !flash_gate_active);
+    ++hash_finishes;
+    advance_time(hash_finish_advance_us);
+    if (hash_finishes == hash_fail_finish_at) return -1;
+    for (size_t i = 0; i < 32; ++i) out[i] = (uint8_t)(operation->sum + i);
+    *actual = hash_bad_finish_size ? 31 : 32;
+    operation->active = 0;
+    --hash_live;
+    return PSA_SUCCESS;
+}
+psa_status_t psa_hash_abort(psa_hash_operation_t *operation)
+{
+    assert(!flash_gate_active);
+    ++hash_aborts;
+    if (operation->active) --hash_live;
+    memset(operation, 0, sizeof *operation);
+    return PSA_SUCCESS;
+}
 static void progress(uint32_t received, uint32_t total, void *context)
 { (void)context; assert(!flash_gate_active && total == IMAGE_BYTES && received <= total); last_progress = received; }
 
@@ -738,6 +783,7 @@ typedef struct {
     int64_t write_ack_elapsed_us;
     int64_t read_elapsed_us;
     uint32_t shortest_timeout_ms;
+    bool assert_incremental_hash;
 } stream_fixture_t;
 
 static bool written_firmware_stream(void *context, uint32_t written, uint32_t total)
@@ -761,6 +807,10 @@ static int read_firmware_stream(void *context, uint8_t *buffer, size_t capacity,
     assert(buffer != NULL && capacity > 0 && capacity <= 64);
     assert(timeout_ms > 0 && timeout_ms <= policy.read_timeout_ms);
     assert(!flash_gate_active);
+    if (source->assert_incremental_hash) {
+        assert(hash_live == 1 && hash_setups == 1 && hash_finishes == 0);
+        assert(input_hashed_bytes == source->offset);
+    }
     ++source->calls;
     if (timeout_ms < source->shortest_timeout_ms) source->shortest_timeout_ms = timeout_ms;
     if (source->retry_reads > 0 && source->offset >= source->retry_after_offset) {
@@ -814,6 +864,85 @@ static void assert_failed_stream(const eota_stream_t *stream, eota_result_t expe
     assert(boot == &old_slot && select_calls == 0);
     assert(init_calls == 0 && transport_create_calls == 0 && cleanup_calls == 0);
     assert(!flash_gate_active);
+    assert(hash_live == 0);
+}
+
+static void test_incremental_input_hash(void)
+{
+    stream_fixture_t source;
+    eota_prepared_t prepared;
+    reset();
+    eota_stream_t stream = make_firmware_stream(&source);
+    stream.no_total_timeout = true;
+    source.assert_incremental_hash = true;
+    source.retry_reads = 3;
+    source.retry_after_offset = 64;
+    use_flash_gate();
+    assert(eota_prepare_stream(&policy, &stream, progress, NULL, &prepared) == EOTA_UPDATE_OK);
+    /* Every next read (including retry and EOF) observes exactly the preceding
+     * input bytes already hashed, while no Flash readback has started. */
+    assert(input_hashed_bytes == IMAGE_BYTES && hash_setups == 2 && hash_finishes == 2);
+    assert(hash_live == 0 && source.eof_calls == 1 && partition_reads == 2 && end_calls == 1);
+    assert(source.written_calls == 2 && select_calls == 0 && boot == &old_slot);
+
+    reset(); stream = make_firmware_stream(&source); crypto_init_failure = true;
+    assert_failed_stream(&stream, EOTA_UPDATE_RESOURCE_FAILURE);
+    assert(source.calls == 0 && hash_setups == 0 && hash_aborts == 1 && begin_calls == 0);
+    reset(); stream = make_firmware_stream(&source); hash_fail_setup_at = 1;
+    assert_failed_stream(&stream, EOTA_UPDATE_RESOURCE_FAILURE);
+    assert(source.calls == 0 && hash_setups == 1 && hash_aborts == 1 && begin_calls == 0);
+
+    reset(); stream = make_firmware_stream(&source); hash_fail_update_after = 0;
+    assert_failed_stream(&stream, EOTA_UPDATE_RESOURCE_FAILURE);
+    assert(source.calls == 1 && hash_updates == 1 && begin_calls == 0 && hash_aborts == 1);
+    reset(); stream = make_firmware_stream(&source); hash_fail_update_after = 1024;
+    assert_failed_stream(&stream, EOTA_UPDATE_RESOURCE_FAILURE);
+    assert(staged_size == 1024 && input_hashed_bytes == 1024 && abort_calls == 1);
+    assert(hash_aborts == 1 && partition_reads == 0 && hash_finishes == 0);
+
+    reset(); stream = make_firmware_stream(&source); hash_fail_finish_at = 1;
+    assert_failed_stream(&stream, EOTA_UPDATE_RESOURCE_FAILURE);
+    assert(source.eof_calls == 1 && staged_size == IMAGE_BYTES && hash_finishes == 1);
+    assert(partition_reads == 0 && end_calls == 0 && abort_calls == 1 && hash_aborts == 1);
+    reset(); stream = make_firmware_stream(&source); hash_bad_finish_size = true;
+    assert_failed_stream(&stream, EOTA_UPDATE_RESOURCE_FAILURE);
+    assert(partition_reads == 0 && end_calls == 0 && abort_calls == 1);
+
+    reset(); stream = make_firmware_stream(&source); stream.sha256[0] ^= 1U;
+    assert_failed_stream(&stream, EOTA_UPDATE_HASH_MISMATCH);
+    assert(hash_finishes == 1 && partition_reads == 0 && end_calls == 0 && abort_calls == 1);
+    reset(); stream = make_firmware_stream(&source); corrupt_readback = true;
+    assert_failed_stream(&stream, EOTA_UPDATE_HASH_MISMATCH);
+    assert(hash_setups == 2 && hash_finishes == 2 && input_hashed_bytes == IMAGE_BYTES);
+    assert(partition_reads == 2 && end_calls == 0 && abort_calls == 1);
+
+    /* Cancellation/disconnection after an actual write still releases the
+     * input provider state, with no hash finish or usable prepared receipt. */
+    reset(); stream = make_firmware_stream(&source); source.available = 1024;
+    source.disconnected = true;
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(staged_size == 1024 && input_hashed_bytes == 1024 && hash_finishes == 0);
+    assert(hash_aborts == 1 && abort_calls == 1);
+    reset(); stream = make_firmware_stream(&source); source.reject_write_ack = true;
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(input_hashed_bytes == 1024 && hash_aborts == 1 && abort_calls == 1);
+    reset(); stream = make_firmware_stream(&source); source.read_elapsed_us = INT64_C(1000000);
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(source.calls == 1 && source.offset > 0 && hash_updates == 0 && hash_aborts == 1);
+    assert(begin_calls == 0); /* A late callback's bytes never enter the hash. */
+
+    /* Hash CPU time cannot renew the write-progress deadline. No 1KiB write
+     * has completed at the old 30s boundary; nor may a late finish pass. */
+    reset(); stream = make_firmware_stream(&source); stream.no_total_timeout = true;
+    hash_update_advance_us = INT64_C(1000000);
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(now_us == INT64_C(30000000) && write_calls == 0 && input_hashed_bytes < 1024);
+    assert(hash_aborts == 1 && hash_finishes == 0);
+    reset(); stream = make_firmware_stream(&source); stream.no_total_timeout = true;
+    hash_finish_advance_us = INT64_C(30000000);
+    assert_failed_stream(&stream, EOTA_UPDATE_DOWNLOAD_FAILED);
+    assert(partition_reads == 0 && end_calls == 0 && hash_finishes == 1 && abort_calls == 1);
+    puts("  incremental input hash passed (in-flight ordering, provider faults/cleanup, readback independence, unchanged write-idle deadline)");
 }
 
 static void test_firmware_stream(void)
@@ -1304,5 +1433,6 @@ int main(void)
     assert(run_update(&request) == EOTA_UPDATE_OK && observed_begins == 0);
     test_flash_gate();
     test_firmware_stream();
+    test_incremental_input_hash();
     puts("  ota_update passed (EAGAIN return, prefix, hash, signature, selector recovery, Flash gate; fake SDK)");
 }
